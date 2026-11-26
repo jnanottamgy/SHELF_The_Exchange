@@ -496,12 +496,13 @@
       pulse = 0.94 + 0.06 * easeOut(t);
     }
 
-    if (doom && doom.shake > 0.3) {
-      ctx.translate((Math.random() * 2 - 1) * doom.shake, (Math.random() * 2 - 1) * doom.shake);
-      doom.shake *= 0.86;
-    }
+    const shake = (doom ? doom.shake : 0) + (game ? game.shake : 0);
+    if (shake > 0.3 && !reduceMotion) ctx.translate((Math.random() * 2 - 1) * shake, (Math.random() * 2 - 1) * shake);
+    if (doom) doom.shake *= 0.86;
+    if (game) game.shake *= 0.86;
     if (state.view === 'globe') drawGlobe(introK, pulse);
     else drawMap(introK);
+    if (game) drawGameLayer(now);
 
     if (fade) {
       const t = clamp((now - fade.start) / fade.dur, 0, 1);
@@ -542,6 +543,7 @@
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(buf.canvas, 0, 0, N, N, cx - R, cy - R, R * 2, R * 2);
     if (doom) drawScars(ctx, cx, cy, R, nowMs - doom.start);
+    if (game) drawCraters(ctx, cx, cy, R);
     drawRings(ctx, cx, cy, R, true, 1);
     ctx.globalAlpha = 1;
     if (doom) {
@@ -632,7 +634,7 @@
       document.body.classList.add('doomed');
       sfx('core');
       const m = coreModel();
-      toast('Planet destroyed. Its ' + m.comp + ' core burns at ' + m.innerTemp.toLocaleString('en-US') + ' °C. Hover the layers, move the sliders, or rebuild (K).', 5200);
+      if (!doom.fromGame) toast('Planet destroyed. Its ' + m.comp + ' core burns at ' + m.innerTemp.toLocaleString('en-US') + ' °C. Hover the layers, move the sliders, or rebuild (K).', 5200);
     }
   }
 
@@ -1647,6 +1649,7 @@
   }
 
   function showTipAt(clientX, clientY) {
+    if (game) { hideTip(); return; }
     if (doom) {
       const L = coreLayerAt(clientX, clientY);
       if (!L) { hideTip(); return; }
@@ -1708,6 +1711,7 @@
 
   dom.canvas.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (game) { if (game.state === 'playing') { e.preventDefault(); shoot(e.clientX, e.clientY); } return; }
     if (doom) { if (doom.coreShown && e.pointerType !== 'mouse') showTipAt(e.clientX, e.clientY); return; } // the strike plays out in screen space
     try { dom.canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -1780,6 +1784,7 @@
   dom.canvas.addEventListener('pointerleave', (e) => { if (e.pointerType === 'mouse') { hover = null; hideTip(); } });
 
   dom.canvas.addEventListener('wheel', (e) => {
+    if (game) { e.preventDefault(); return; }
     if (state.view !== 'globe') return;
     e.preventDefault();
     const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? 400 : 1;
@@ -1801,6 +1806,15 @@
     if (!dom.helpModal.hidden) {
       if (e.key === 'Escape') { e.preventDefault(); closeHelp(); }
       else if (e.key === 'Tab') trapFocus(e);
+      return;
+    }
+    if (game) {
+      const gk = e.key;
+      if (gk === 'Escape') { e.preventDefault(); if (game.state === 'playing') togglePause(); else exitGame(); }
+      else if (gk === ' ' || gk === 'Spacebar') {
+        if (game.state === 'playing' || game.state === 'paused') { e.preventDefault(); togglePause(); }
+      } else if ((gk === 'a' || gk === 'A') && !e.ctrlKey && !e.metaKey) toggleSound();
+      else if (gk === 'Enter' && (game.state === 'intro' || game.state === 'over') && !(e.target && e.target.tagName === 'BUTTON')) { e.preventDefault(); startGame(); }
       return;
     }
     if (e.key === 'Escape') {
@@ -1828,6 +1842,7 @@
     else if (k === 'a' || k === 'A') toggleSound();
     else if (k === 'h' || k === 'H') setPhoto(!document.body.classList.contains('photo'));
     else if (k === 'k' || k === 'K') startDoom();
+    else if (k === 'd' || k === 'D') openGame();
     else if (k === 'x' || k === 'X') resetSliders();
     else if (k === 's' || k === 'S') share();
     else if (k === 'p' || k === 'P') savePostcard();
@@ -1916,6 +1931,7 @@
   });
 
   function applyExternalState(s) {
+    if (game) exitGame();
     tween = null;
     setLapse(false);
     state.temp = s.temp; state.water = s.water; state.terrain = s.terrain; state.speed = s.speed;
@@ -2090,6 +2106,616 @@
   }
 
   // ---------------------------------------------------------------------------
+  // Planet Defense: an arcade mode on top of the planet. Meteors fly in from
+  // every side; click or tap them to shoot them down with a beam from the
+  // surface. Impacts leave craters and cracks that turn with the planet.
+  // Three hits and the planet shatters (the meteor strike is the game over).
+  // Waves speed up, combos multiply the score, and the best score is kept.
+  // ---------------------------------------------------------------------------
+  const G_LIVES = 3;
+  const coarse = !!(window.matchMedia && window.matchMedia('(pointer: coarse)').matches);
+  const gui = {
+    root: $('game-ui'), lives: $('gh-lives'), score: $('gh-score'), wave: $('gh-wave'), combo: $('gh-combo'),
+    best: $('gh-best'), banner: $('game-banner'), bTitle: $('gb-title'), bSub: $('gb-sub'),
+    card: $('game-card'), tip: $('game-tip'), vignette: $('game-vignette'),
+  };
+  let game = null, gameFont = null;
+  let bestScore = 0;
+  try { bestScore = Math.floor(Number(localStorage.getItem('tinyterra-best')) || 0); } catch (e) { bestScore = 0; }
+  if (!Number.isFinite(bestScore) || bestScore < 0 || bestScore > 1e9) bestScore = 0;
+
+  function viewToPlanet(v) {
+    const m = planetMatrix();
+    return [m[0] * v[0] + m[1] * v[1] + m[2] * v[2], m[3] * v[0] + m[4] * v[1] + m[5] * v[2], m[6] * v[0] + m[7] * v[1] + m[8] * v[2]];
+  }
+  function planetToView(p, m) {
+    return [m[0] * p[0] + m[3] * p[1] + m[6] * p[2], m[1] * p[0] + m[4] * p[1] + m[7] * p[2], m[2] * p[0] + m[5] * p[1] + m[8] * p[2]];
+  }
+  /** A point on the visible disc (x right, y down, in planet radii) as a planet-space unit vector. */
+  function discToPlanet(x, y) {
+    const d2 = x * x + y * y, s = d2 > 0.97 ? Math.sqrt(0.97 / d2) : 1;
+    const vx = x * s, vy = -y * s;
+    return viewToPlanet([vx, vy, Math.sqrt(Math.max(0, 1 - vx * vx - vy * vy))]);
+  }
+  function population() {
+    return climate && climate.stats.civilization ? (((planet.hash >>> 5) % 90) + 10) / 10 : 0;
+  }
+  function comboMult() { return Math.min(8, 1 + Math.floor(game.combo / 4)); }
+
+  function newGameState(st, prevZoom) {
+    return {
+      state: st, score: 0, lives: G_LIVES, wave: 0, combo: 0, comboT: 0,
+      meteors: [], parts: [], beams: [], texts: [], rings: [], craters: [],
+      spawnLeft: 0, spawnT: 0, breakT: 0, beatT: 0.6, beatN: 0, powerT: rnd(12, 20),
+      shots: 0, hits: 0, kills: 0, shake: 0, nova: 0, newBest: false, prevZoom: prevZoom || 1,
+    };
+  }
+
+  function openGame() {
+    if (game) return;
+    if (!planet || !climate || builder) { toast('Wait a moment, the planet is still forming'); return; }
+    if (doom) rebuildPlanet(true);
+    if (!dom.helpModal.hidden) closeHelp();
+    setLapse(false);
+    tween = null;
+    if (document.body.classList.contains('photo')) setPhoto(false);
+    if (state.view !== 'globe') setView('globe');
+    hideTip();
+    hover = null;
+    game = newGameState('intro', view.targetZoom);
+    document.body.classList.add('gaming');
+    resize();
+    view.targetZoom = cssW < 700 ? 0.66 : 0.74;
+    if (audio) audio.duck(true);
+    gui.tip.classList.remove('gone');
+    renderGameHud();
+    showGameCard('intro');
+    markInteracted();
+    sfx('click');
+  }
+
+  function startGame() {
+    if (!game) return;
+    if (doom) { rebuildPlanet(true); introStart = reduceMotion ? -1 : performance.now(); }
+    game = newGameState('playing', game.prevZoom);
+    hideGameCard();
+    gui.root.classList.remove('danger');
+    renderGameHud();
+    nextWave();
+    sfx('start');
+    clearTimeout(startGame.tipTimer);
+    gui.tip.classList.remove('gone');
+    startGame.tipTimer = setTimeout(() => gui.tip.classList.add('gone'), 6000);
+  }
+
+  function exitGame() {
+    if (!game) return;
+    const prevZoom = game.prevZoom;
+    game = null;
+    if (doom) rebuildPlanet(true);
+    introStart = reduceMotion ? -1 : performance.now();
+    document.body.classList.remove('gaming');
+    gui.root.classList.remove('danger');
+    gui.banner.classList.remove('show');
+    hideGameCard();
+    view.targetZoom = prevZoom || 1;
+    if (audio) audio.duck(false);
+    resize();
+    dirty = true;
+  }
+
+  function togglePause() {
+    if (!game) return;
+    if (game.state === 'playing') { game.state = 'paused'; showGameCard('paused'); sfx('click'); }
+    else if (game.state === 'paused') { game.state = 'playing'; hideGameCard(); sfx('click'); }
+  }
+
+  function nextWave() {
+    game.wave++;
+    game.spawnLeft = 6 + game.wave * 3;
+    game.spawnT = 1.5;
+    game.breakT = 0;
+    banner('Wave ' + game.wave, game.wave === 1 ? 'Incoming' : game.wave % 3 === 0 ? 'Meteor storm' : 'Faster and bigger');
+    sfx('wave');
+    renderGameHud();
+  }
+
+  function banner(title, sub) {
+    gui.bTitle.textContent = title;
+    gui.bSub.textContent = sub || '';
+    gui.banner.classList.remove('show');
+    void gui.banner.offsetWidth;
+    gui.banner.classList.add('show');
+  }
+
+  function renderGameHud() {
+    if (!game) return;
+    setNumber(gui.score, game.score, 'peak', true);
+    gui.wave.textContent = 'Wave ' + Math.max(1, game.wave);
+    gui.combo.textContent = '×' + comboMult();
+    gui.best.textContent = Math.max(bestScore, game.score).toLocaleString('en-US');
+    gui.lives.querySelectorAll('.life').forEach((el, i) => {
+      el.classList.toggle('on', i < game.lives);
+      el.classList.toggle('lost', i >= game.lives);
+    });
+    gui.lives.setAttribute('aria-label', game.lives + ' of ' + G_LIVES + ' shields left');
+    gui.root.classList.toggle('danger', game.lives === 1 && game.state === 'playing');
+  }
+
+  function showGameCard(kind) {
+    const c = gui.card;
+    c.textContent = '';
+    c.className = 'game-card show' + (kind === 'over' ? ' side' : '');
+    const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
+    const btn = (label, primary, fn) => { const b = el('button', 'g-btn' + (primary ? ' primary' : ''), label); b.type = 'button'; b.addEventListener('click', fn); return b; };
+    const title = (text) => { const h = el('h2', null, text); h.id = 'gc-title'; return h; };
+    const actions = el('div', 'gc-actions');
+    if (kind === 'intro') {
+      const pop = population();
+      c.append(el('div', 'gc-eyebrow', 'Planet Defense'), title('Defend ' + planet.name),
+        el('p', null, 'Meteors are inbound. Click or tap them before they hit. Three hits and ' + planet.name +
+          ' is lost' + (pop ? ', along with its ' + pop.toFixed(1) + ' billion people.' : '.')));
+      const rules = el('ul', 'gc-rules');
+      [['#b48a63', 'Rocks: one shot · 100'], ['#6b4a35', 'Boulders: three shots, then they split · 250'],
+        ['#ffd27a', 'Golden streaks: fast · 300'], ['#8cdcaa', 'Green orb: repairs a shield'], ['#aad2ff', 'Blue orb: nova, clears the sky']]
+        .forEach(([col, text]) => { const li = el('li'); const d = el('span', 'gc-dot'); d.style.background = col; li.append(d, el('span', null, text)); rules.append(li); });
+      c.append(rules);
+      actions.append(btn('Start', true, startGame), btn('Back to the lab', false, exitGame));
+      c.append(actions, el('div', 'gc-foot', 'Best score ' + bestScore.toLocaleString('en-US') + ' · chain hits for up to ×8 · Space pauses'));
+    } else if (kind === 'paused') {
+      c.append(el('div', 'gc-eyebrow', 'Planet Defense'), title('Paused'),
+        el('p', null, 'Wave ' + game.wave + ' · score ' + game.score.toLocaleString('en-US') + '. The meteors will wait.'));
+      actions.append(btn('Resume', true, togglePause), btn('Quit', false, exitGame));
+      c.append(actions);
+    } else {
+      const m = coreModel();
+      c.append(el('div', 'gc-eyebrow', 'Game over'), title(planet.name + ' is lost'),
+        el('p', null, 'Its ' + m.comp + ' core lies open at ' + m.innerTemp.toLocaleString('en-US') + ' °C.'));
+      const stats = el('div', 'gc-stats');
+      const acc = game.shots ? Math.round((game.hits / game.shots) * 100) : 0;
+      [['Score', game.score.toLocaleString('en-US'), game.newBest], ['Wave reached', String(game.wave), false],
+        ['Meteors destroyed', String(game.kills), false], ['Accuracy', acc + '%', false]].forEach(([label, value, isNew]) => {
+        const s = el('div', 'gc-stat');
+        s.append(el('span', null, label), el('b', null, value));
+        if (isNew) s.append(el('em', 'gc-new', 'NEW BEST'));
+        stats.append(s);
+      });
+      actions.append(btn('Play again', true, startGame), btn('Back to the lab', false, exitGame));
+      c.append(stats, actions, el('div', 'gc-foot', 'Best score ' + bestScore.toLocaleString('en-US')));
+    }
+    const first = c.querySelector('.g-btn.primary');
+    if (first && !coarse) setTimeout(() => { try { first.focus({ preventScroll: true }); } catch (e) { first.focus(); } }, 60);
+  }
+  function hideGameCard() { gui.card.className = 'game-card'; gui.card.textContent = ''; }
+
+  // --- spawning -------------------------------------------------------------
+  function farRadius() {
+    const R = Math.max(40, globeRadius());
+    const { cx, cy } = layout;
+    return (Math.hypot(Math.max(cx, cssW - cx), Math.max(cy, cssH - cy)) + 50) / R;
+  }
+  function rockShape(n) { const pts = []; for (let i = 0; i < n; i++) pts.push(rnd(0.72, 1.12)); return pts; }
+
+  /** Distance (in planet radii) from the planet centre to just beyond the screen edge, along angle a. */
+  function edgeRadius(a) {
+    const R = Math.max(40, globeRadius()), { cx, cy } = layout;
+    const c = Math.cos(a), s2 = Math.sin(a);
+    const tx = c > 1e-6 ? (cssW - cx) / c : c < -1e-6 ? -cx / c : Infinity;
+    const ty = s2 > 1e-6 ? (cssH - cy) / s2 : s2 < -1e-6 ? -cy / s2 : Infinity;
+    return (Math.min(tx, ty) + 36) / R;
+  }
+
+  function spawnMeteor(kind, from) {
+    const a = rnd(0, Math.PI * 2), edge = edgeRadius(a);
+    const ta = rnd(0, Math.PI * 2), tr = Math.sqrt(rnd(0, 0.62));
+    const sx = from ? from[0] : Math.cos(a) * edge, sy = from ? from[1] : Math.sin(a) * edge;
+    const tx = Math.cos(ta) * tr, ty = Math.sin(ta) * tr;
+    // Speed in planet radii per second: faster every wave.
+    const speed = Math.min(1.5, 0.55 + 0.09 * (game.wave - 1)) * (kind === 'big' ? 0.72 : kind === 'fast' ? 2.1 : rnd(0.9, 1.12));
+    const m = {
+      kind, sx, sy, tx, ty, t: 0,
+      dur: from ? from[2] : Math.max(1.5, Math.hypot(tx - sx, ty - sy) / speed),
+      size: kind === 'big' ? 0.125 : kind === 'fast' ? 0.048 : rnd(0.062, 0.086),
+      hp: kind === 'big' ? 3 : 1, rot: rnd(0, 6.28), spin: rnd(-2.5, 2.5), shape: rockShape(kind === 'big' ? 11 : 8), flash: 0,
+    };
+    m.maxHp = m.hp;
+    game.meteors.push(m);
+    return m;
+  }
+
+  function spawnPower() {
+    const far = farRadius();
+    const kind = game.lives < G_LIVES && Math.random() < 0.65 ? 'repair' : 'nova';
+    const a = rnd(0, Math.PI * 2), b = a + Math.PI + rnd(-0.5, 0.5);
+    game.meteors.push({ kind, power: true, sx: Math.cos(a) * far, sy: Math.sin(a) * far, tx: Math.cos(b) * far, ty: Math.sin(b) * far,
+      t: 0, dur: 8.5, size: 0.06, hp: 1, maxHp: 1, rot: 0, spin: 1.6, flash: 0 });
+  }
+
+  function meteorPos(m) {
+    const R = Math.max(40, globeRadius());
+    const k = clamp(m.t / m.dur, 0, 1);
+    const e = m.power ? k : k * (0.55 + 0.45 * k); // rocks speed up as they fall in
+    const nx = m.sx + (m.tx - m.sx) * e, ny = m.sy + (m.ty - m.sy) * e;
+    return { x: layout.cx + nx * R, y: layout.cy + ny * R, nx, ny, k, r: Math.max(m.power ? 13 : 8, m.size * R * (m.power ? 1 : 0.8 + 0.35 * k)) };
+  }
+
+  // --- player actions --------------------------------------------------------
+  function shoot(clientX, clientY) {
+    if (!game || game.state !== 'playing') return;
+    const rect = dom.canvas.getBoundingClientRect();
+    const x = clientX - rect.left, y = clientY - rect.top;
+    game.shots++;
+    let best = null, bd = Infinity;
+    for (const m of game.meteors) {
+      const p = meteorPos(m);
+      const reach = Math.max(p.r * 1.5, coarse ? 30 : 20);
+      const d = Math.hypot(p.x - x, p.y - y);
+      if (d < reach && d < bd) { bd = d; best = { m, p }; }
+    }
+    fireBeam(best ? best.p.x : x, best ? best.p.y : y);
+    if (!best) {
+      if (game.combo > 0) { game.combo = 0; renderGameHud(); }
+      puff(x, y, '236,233,224', 6);
+      sfx('miss');
+      return;
+    }
+    game.hits++;
+    const { m, p } = best;
+    if (m.power) { collectPower(m, p); return; }
+    m.hp--;
+    m.flash = 1;
+    if (m.hp > 0) { puff(p.x, p.y, '255,200,120', 9); sfx('clink'); return; }
+    destroyMeteor(m, p, true);
+  }
+
+  function destroyMeteor(m, p, scored) {
+    const i = game.meteors.indexOf(m);
+    if (i >= 0) game.meteors.splice(i, 1);
+    const big = m.kind === 'big';
+    explodeAt(p.x, p.y, p.r, m.kind === 'fast' ? '255,215,120' : '255,150,60', big ? 1.6 : 1);
+    if (!scored) return;
+    game.kills++;
+    game.combo++;
+    game.comboT = 2.4;
+    const mult = comboMult();
+    const pts = (big ? 250 : m.kind === 'fast' ? 300 : 100) * mult;
+    game.score += pts;
+    floatText(p.x, p.y - p.r - 6, '+' + pts + (mult > 1 ? ' ×' + mult : ''), m.kind === 'fast' ? '#ffd98a' : '#ecebe4');
+    sfx('pop', game.combo);
+    if (game.combo % 4 === 0) {
+      sfx('combo', mult);
+      gui.combo.classList.remove('pop'); void gui.combo.offsetWidth; gui.combo.classList.add('pop');
+      if (mult >= 3) floatText(layout.cx, layout.cy - globeRadius() - 26, 'Combo ×' + mult + '!', '#d9b26f', 1.2);
+    }
+    if (big) {
+      for (let s = 0; s < 2; s++) {
+        const child = spawnMeteor('rock', [p.nx, p.ny, Math.max(1.6, (m.dur - m.t) * 0.9 + rnd(0.2, 0.8))]);
+        child.size = 0.058;
+      }
+    }
+    renderGameHud();
+  }
+
+  function collectPower(m, p) {
+    const i = game.meteors.indexOf(m);
+    if (i >= 0) game.meteors.splice(i, 1);
+    game.score += 150 * comboMult();
+    if (m.kind === 'repair') {
+      if (game.lives < G_LIVES) { game.lives++; game.craters.pop(); } // the newest crater heals over
+      floatText(p.x, p.y - 22, 'Shield repaired', '#a9e0bd', 1.1);
+      explodeAt(p.x, p.y, p.r, '140,220,170', 1.2);
+      sfx('power');
+    } else {
+      floatText(p.x, p.y - 22, 'Nova!', '#cfe8ff', 1.1);
+      explodeAt(p.x, p.y, p.r, '170,210,255', 1.6);
+      game.nova = 0.7;
+      game.meteors.filter((x) => !x.power).forEach((x, k) => {
+        setTimeout(() => { if (game && game.state === 'playing' && game.meteors.includes(x)) destroyMeteor(x, meteorPos(x), true); }, k * 70);
+      });
+      sfx('nova');
+    }
+    renderGameHud();
+  }
+
+  function impact(m, p) {
+    const i = game.meteors.indexOf(m);
+    if (i >= 0) game.meteors.splice(i, 1);
+    const big = m.kind === 'big';
+    game.lives = Math.max(0, game.lives - 1);
+    game.combo = 0;
+    const cracks = makeCracks(m.tx, m.ty).map((poly) => poly.map((q) => discToPlanet(q[0], q[1])));
+    game.craters.push({ p: discToPlanet(m.tx, m.ty), cracks, age: 0, size: big ? 1.5 : 1 });
+    explodeAt(p.x, p.y, p.r * 1.4, '255,120,50', big ? 2 : 1.4);
+    game.shake = reduceMotion ? 0 : 16;
+    gui.vignette.classList.remove('hit'); void gui.vignette.offsetWidth; gui.vignette.classList.add('hit');
+    gui.lives.classList.remove('hit'); void gui.lives.offsetWidth; gui.lives.classList.add('hit');
+    sfx('hurt');
+    renderGameHud();
+    if (game.lives <= 0) loseGame();
+  }
+
+  function loseGame() {
+    game.state = 'dying';
+    gui.root.classList.remove('danger');
+    game.meteors.forEach((m) => { const q = meteorPos(m); explodeAt(q.x, q.y, q.r, '255,150,60', 1); });
+    game.meteors = [];
+    if (game.score > bestScore) {
+      bestScore = game.score;
+      game.newBest = true;
+      try { localStorage.setItem('tinyterra-best', String(bestScore)); } catch (e) { /* private mode */ }
+    }
+    // Hand the damage to the meteor-strike sequence: the cracks spread, the planet shatters, the core shows.
+    const mtx = planetMatrix();
+    const impacts = [];
+    game.craters.forEach((c) => {
+      const v = planetToView(c.p, mtx);
+      if (v[2] <= 0.05) return;
+      const cracks = c.cracks.map((poly) => {
+        const out = [];
+        for (const q of poly) { const w = planetToView(q, mtx); if (w[2] <= 0.02) break; out.push([w[0], -w[1]]); }
+        return out;
+      }).filter((poly) => poly.length > 1);
+      impacts.push({ x: v[0], y: -v[1], sx: v[0], sy: -v[1], at: -5000, size: c.size, hit: true, cracks });
+    });
+    if (!impacts.length) impacts.push({ x: 0, y: 0, sx: 0, sy: 0, at: -5000, size: 1.2, hit: true, cracks: makeCracks(0, 0) });
+    const swirls = [];
+    for (let i = 0; i < 26; i++) swirls.push({ r: rnd(0.6, 0.9), a: rnd(0, Math.PI * 2), len: rnd(0.3, 1.1), w: rnd(0.006, 0.02), light: Math.random() < 0.5 });
+    doom = { start: performance.now() - (T_EXPLODE - 1600), impacts, swirls, exploded: false, explodeAt: 0, cracked: true, coreShown: false,
+      shards: null, debris: null, shake: 12, model: null, coreGeom: null, fromGame: true };
+    game.craters = [];
+    setDoomUi(true);
+    banner(planet.name + ' is breaking up', 'Shields down');
+    sfx('over');
+    renderGameHud();
+  }
+
+  // --- effects -----------------------------------------------------------------
+  function explodeAt(x, y, r, rgb, scale) {
+    const n = Math.round(16 * scale);
+    for (let i = 0; i < n; i++) {
+      const a = rnd(0, Math.PI * 2), sp = rnd(60, 260) * scale;
+      game.parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, age: 0, life: rnd(0.4, 0.95),
+        size: rnd(1.4, 3.6) * Math.sqrt(scale), rgb: Math.random() < 0.6 ? rgb : '130,112,96', glow: Math.random() < 0.45 });
+    }
+    game.rings.push({ x, y, r0: r * 0.6, r1: r * 3.2 * scale, age: 0, life: 0.5, rgb });
+    if (game.parts.length > 700) game.parts.splice(0, game.parts.length - 700);
+  }
+  function puff(x, y, rgb, n) {
+    for (let i = 0; i < n; i++) {
+      const a = rnd(0, Math.PI * 2), sp = rnd(30, 110);
+      game.parts.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, age: 0, life: rnd(0.2, 0.4), size: rnd(1, 2), rgb, glow: false });
+    }
+  }
+  function floatText(x, y, text, color, scale) { game.texts.push({ x, y, text, color, age: 0, life: 0.95, scale: scale || 1 }); }
+  function fireBeam(x, y) {
+    const R = Math.max(40, globeRadius()), { cx, cy } = layout;
+    const dx = x - cx, dy = y - cy, d = Math.hypot(dx, dy) || 1;
+    const x0 = d > R * 1.02 ? cx + (dx / d) * R * 0.98 : x, y0 = d > R * 1.02 ? cy + (dy / d) * R * 0.98 : y;
+    game.beams.push({ x0, y0, x1: x, y1: y, age: 0, life: 0.16 });
+    sfx('zap');
+  }
+
+  // --- loop --------------------------------------------------------------------
+  function stepGame(dt) {
+    if (!game) return;
+    const drag8 = Math.pow(0.12, dt);
+    for (const p of game.parts) { p.age += dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= drag8; p.vy *= drag8; }
+    game.parts = game.parts.filter((p) => p.age < p.life);
+    game.rings.forEach((r) => { r.age += dt; });
+    game.rings = game.rings.filter((r) => r.age < r.life);
+    game.beams.forEach((b) => { b.age += dt; });
+    game.beams = game.beams.filter((b) => b.age < b.life);
+    game.texts.forEach((t) => { t.age += dt; });
+    game.texts = game.texts.filter((t) => t.age < t.life);
+    game.craters.forEach((c) => { c.age += dt; });
+    if (game.nova > 0) game.nova = Math.max(0, game.nova - dt);
+
+    if (game.state === 'dying') {
+      if (doom && doom.coreShown) { game.state = 'over'; showGameCard('over'); }
+      return;
+    }
+    if (game.state !== 'playing') return;
+
+    if (game.combo > 0) { game.comboT -= dt; if (game.comboT <= 0) { game.combo = 0; renderGameHud(); } }
+    // Heartbeat bass line: faster as the shields fall.
+    game.beatT -= dt;
+    if (game.beatT <= 0) { game.beatT = [0.3, 0.4, 0.55][clamp(game.lives - 1, 0, 2)]; sfx('pulse', game.beatN++); }
+
+    // Waves
+    if (game.breakT > 0) {
+      game.breakT -= dt;
+      if (game.breakT <= 0) nextWave();
+    } else if (game.spawnLeft > 0) {
+      game.spawnT -= dt;
+      if (game.spawnT <= 0) {
+        const w = game.wave, r = Math.random();
+        spawnMeteor(w >= 2 && r < 0.17 ? 'big' : w >= 3 && r < 0.34 ? 'fast' : 'rock');
+        game.spawnLeft--;
+        if (w >= 4 && game.spawnLeft > 0 && Math.random() < 0.3) { spawnMeteor('rock'); game.spawnLeft--; }
+        game.spawnT = Math.max(0.3, 1.3 - 0.11 * (w - 1)) * rnd(0.65, 1.3);
+      }
+    } else if (!game.meteors.some((m) => !m.power)) {
+      const bonus = 150 * game.wave * game.lives;
+      game.score += bonus;
+      banner('Wave ' + game.wave + ' cleared', '+' + bonus.toLocaleString('en-US') + ' shield bonus');
+      sfx('power');
+      game.breakT = 2.4;
+      renderGameHud();
+    }
+
+    game.powerT -= dt;
+    if (game.powerT <= 0) { spawnPower(); game.powerT = rnd(13, 22); }
+
+    for (const m of game.meteors.slice()) {
+      m.t += dt;
+      m.rot += m.spin * dt;
+      if (m.flash > 0) m.flash = Math.max(0, m.flash - dt * 4);
+      if (m.t >= m.dur) {
+        if (m.power) { const i = game.meteors.indexOf(m); if (i >= 0) game.meteors.splice(i, 1); }
+        else { impact(m, meteorPos(m)); if (game.state !== 'playing') break; }
+      }
+    }
+  }
+
+  // --- drawing -------------------------------------------------------------------
+  function glowDot(g, x, y, r, rgb, a) {
+    if (a <= 0 || r <= 0) return;
+    const gr = g.createRadialGradient(x, y, 0, x, y, r);
+    gr.addColorStop(0, 'rgba(' + rgb + ',' + a + ')');
+    gr.addColorStop(1, 'rgba(' + rgb + ',0)');
+    g.fillStyle = gr;
+    g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill();
+  }
+
+  /** Craters and glowing cracks, stored on the planet so they turn with it. */
+  function drawCraters(g, cx, cy, R) {
+    if (!game || !game.craters.length) return;
+    const mtx = planetMatrix();
+    const damage = 1 - game.lives / G_LIVES;
+    const lw = Math.max(1, R / 240);
+    g.save();
+    g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.clip();
+    if (game.lives === 1) {
+      const k = 0.5 + 0.5 * Math.sin(performance.now() * 0.006);
+      const hg = g.createRadialGradient(cx, cy, R * 0.3, cx, cy, R);
+      hg.addColorStop(0, 'rgba(255,110,40,' + (0.06 + 0.08 * k) + ')');
+      hg.addColorStop(1, 'rgba(170,30,12,' + (0.22 + 0.16 * k) + ')');
+      g.fillStyle = hg; g.fillRect(cx - R, cy - R, R * 2, R * 2);
+    }
+    g.lineCap = 'round'; g.lineJoin = 'round';
+    for (const c of game.craters) {
+      for (const poly of c.cracks) {
+        g.beginPath();
+        let on = false;
+        for (const q of poly) {
+          const v = planetToView(q, mtx);
+          if (v[2] <= 0) { on = false; continue; }
+          const x = cx + v[0] * R, y = cy - v[1] * R;
+          if (on) g.lineTo(x, y); else { g.moveTo(x, y); on = true; }
+        }
+        g.strokeStyle = 'rgba(255,90,25,' + (0.35 + damage * 0.3) + ')'; g.lineWidth = lw * (4 + damage * 3); g.stroke();
+        g.strokeStyle = 'rgba(255,214,140,0.9)'; g.lineWidth = lw * 1.5; g.stroke();
+      }
+      const v = planetToView(c.p, mtx);
+      if (v[2] <= 0.02) continue;
+      const x = cx + v[0] * R, y = cy - v[1] * R, rc = R * 0.07 * c.size;
+      const glow = 0.55 + 0.45 * Math.exp(-c.age / 2.5);
+      g.save();
+      g.translate(x, y); g.rotate(Math.atan2(y - cy, x - cx)); g.scale(Math.max(0.25, v[2]), 1);
+      const cg = g.createRadialGradient(0, 0, 0, 0, 0, rc * 1.6);
+      cg.addColorStop(0, 'rgba(255,240,190,' + glow + ')');
+      cg.addColorStop(0.25, 'rgba(255,140,50,' + (0.9 * glow) + ')');
+      cg.addColorStop(0.6, 'rgba(110,28,12,0.8)');
+      cg.addColorStop(1, 'rgba(20,8,5,0)');
+      g.fillStyle = cg; g.beginPath(); g.arc(0, 0, rc * 1.6, 0, Math.PI * 2); g.fill();
+      g.restore();
+    }
+    g.restore();
+  }
+
+  function drawRock(g, m, now) {
+    const p = meteorPos(m);
+    if (m.power) {
+      const col = m.kind === 'repair' ? '140,220,170' : '170,210,255';
+      const pr = p.r * (1 + 0.12 * Math.sin(now * 0.008));
+      glowDot(g, p.x, p.y, pr * 2.6, col, 0.55);
+      g.fillStyle = 'rgba(' + col + ',0.95)';
+      g.beginPath(); g.arc(p.x, p.y, pr * 0.62, 0, Math.PI * 2); g.fill();
+      g.strokeStyle = 'rgba(255,255,255,0.95)'; g.lineWidth = 2; g.lineCap = 'round';
+      g.beginPath();
+      if (m.kind === 'repair') {
+        g.moveTo(p.x - pr * 0.3, p.y); g.lineTo(p.x + pr * 0.3, p.y);
+        g.moveTo(p.x, p.y - pr * 0.3); g.lineTo(p.x, p.y + pr * 0.3);
+      } else {
+        for (let i = 0; i < 6; i++) {
+          const a = m.rot + (i * Math.PI) / 3;
+          g.moveTo(p.x + Math.cos(a) * pr * 0.18, p.y + Math.sin(a) * pr * 0.18);
+          g.lineTo(p.x + Math.cos(a) * pr * 0.42, p.y + Math.sin(a) * pr * 0.42);
+        }
+      }
+      g.stroke();
+      return;
+    }
+    const dx = m.tx - m.sx, dy = m.ty - m.sy, dl = Math.hypot(dx, dy) || 1, ux = dx / dl, uy = dy / dl;
+    const fast = m.kind === 'fast', big = m.kind === 'big';
+    const tl = p.r * (fast ? 16 : big ? 6 : 8), tx = p.x - ux * tl, ty = p.y - uy * tl, px = -uy, py = ux;
+    const tc = fast ? '255,226,150' : big ? '255,110,50' : '255,160,80';
+    const tg = g.createLinearGradient(p.x, p.y, tx, ty);
+    tg.addColorStop(0, 'rgba(' + tc + ',0.75)'); tg.addColorStop(0.4, 'rgba(' + tc + ',0.28)'); tg.addColorStop(1, 'rgba(' + tc + ',0)');
+    g.fillStyle = tg;
+    g.beginPath();
+    g.moveTo(p.x + px * p.r * 0.95, p.y + py * p.r * 0.95); g.lineTo(tx, ty); g.lineTo(p.x - px * p.r * 0.95, p.y - py * p.r * 0.95);
+    g.closePath(); g.fill();
+    glowDot(g, p.x + ux * p.r * 0.35, p.y + uy * p.r * 0.35, p.r * 2.1, fast ? '255,230,170' : '255,140,60', 0.5);
+    g.save();
+    g.translate(p.x, p.y); g.rotate(m.rot);
+    g.beginPath();
+    const n = m.shape.length;
+    for (let i = 0; i < n; i++) {
+      const a = (i / n) * Math.PI * 2, rr = p.r * m.shape[i];
+      if (i) g.lineTo(Math.cos(a) * rr, Math.sin(a) * rr); else g.moveTo(Math.cos(a) * rr, Math.sin(a) * rr);
+    }
+    g.closePath();
+    const bg = g.createRadialGradient(-p.r * 0.3, -p.r * 0.3, 0, 0, 0, p.r * 1.2);
+    bg.addColorStop(0, fast ? '#e2c88e' : big ? '#6b5444' : '#8f7866');
+    bg.addColorStop(1, fast ? '#6f5a2e' : big ? '#2a1e17' : '#3a2d24');
+    g.fillStyle = bg; g.fill();
+    g.strokeStyle = m.flash > 0 ? 'rgba(255,255,255,' + m.flash + ')' : 'rgba(255,150,80,0.55)';
+    g.lineWidth = m.flash > 0 ? 2.5 : 1.2;
+    g.stroke();
+    g.restore();
+    if (big && m.hp < m.maxHp) {
+      for (let i = 0; i < m.maxHp; i++) {
+        g.fillStyle = i < m.hp ? 'rgba(255,214,150,0.95)' : 'rgba(255,255,255,0.18)';
+        g.beginPath(); g.arc(p.x - 8 + i * 8, p.y - p.r - 10, 2.6, 0, Math.PI * 2); g.fill();
+      }
+    }
+  }
+
+  function drawGameLayer(now) {
+    if (!game) return;
+    const g = ctx;
+    for (const b of game.beams) {
+      const a = 1 - b.age / b.life;
+      if (b.x0 !== b.x1 || b.y0 !== b.y1) {
+        const gr = g.createLinearGradient(b.x0, b.y0, b.x1, b.y1);
+        gr.addColorStop(0, 'rgba(255,240,200,' + a + ')'); gr.addColorStop(1, 'rgba(255,190,110,' + a * 0.9 + ')');
+        g.strokeStyle = gr; g.lineCap = 'round';
+        g.globalAlpha = 0.35; g.lineWidth = 10 * a + 2;
+        g.beginPath(); g.moveTo(b.x0, b.y0); g.lineTo(b.x1, b.y1); g.stroke();
+        g.globalAlpha = 1; g.lineWidth = 3 * a + 1; g.stroke();
+        glowDot(g, b.x0, b.y0, 10 * a + 2, '255,236,190', a);
+      }
+      glowDot(g, b.x1, b.y1, 14 * a + 2, '255,220,160', a * 0.9);
+    }
+    g.globalAlpha = 1;
+    for (const m of game.meteors) drawRock(g, m, now);
+    for (const r of game.rings) {
+      const k = r.age / r.life;
+      g.strokeStyle = 'rgba(' + r.rgb + ',' + (1 - k) * 0.8 + ')';
+      g.lineWidth = 3 * (1 - k) + 0.5;
+      g.beginPath(); g.arc(r.x, r.y, r.r0 + (r.r1 - r.r0) * easeOut(k), 0, Math.PI * 2); g.stroke();
+    }
+    for (const p of game.parts) {
+      const a = 1 - p.age / p.life;
+      if (p.glow) glowDot(g, p.x, p.y, p.size * 2.6, p.rgb, a * 0.8);
+      g.fillStyle = 'rgba(' + p.rgb + ',' + a + ')';
+      g.beginPath(); g.arc(p.x, p.y, p.size * (0.6 + 0.4 * a), 0, Math.PI * 2); g.fill();
+    }
+    if (!gameFont) gameFont = getComputedStyle(document.body).fontFamily;
+    g.textAlign = 'center';
+    for (const t of game.texts) {
+      const k = t.age / t.life, yy = t.y - k * 38;
+      g.globalAlpha = 1 - k * k;
+      g.font = '700 ' + Math.round(15 * t.scale) + 'px ' + gameFont;
+      g.fillStyle = 'rgba(0,0,0,0.6)'; g.fillText(t.text, t.x + 1, yy + 1);
+      g.fillStyle = t.color; g.fillText(t.text, t.x, yy);
+    }
+    g.globalAlpha = 1;
+    if (game.nova > 0) { g.fillStyle = 'rgba(200,225,255,' + (game.nova / 0.7) * 0.35 + ')'; g.fillRect(-20, -20, cssW + 40, cssH + 40); }
+  }
+
+  // ---------------------------------------------------------------------------
   // Wiring
   // ---------------------------------------------------------------------------
   ['temp', 'water', 'terrain', 'speed'].forEach((k) => {
@@ -2101,6 +2727,9 @@
   dom.tg.grid.addEventListener('click', () => setToggle('grid', !state.grid));
   dom.tg.lapse.addEventListener('click', () => { setLapse(!lapse); markInteracted(); });
   $('tg-meteor').addEventListener('click', startDoom);
+  $('btn-game').addEventListener('click', openGame);
+  $('gh-pause').addEventListener('click', () => { if (game && (game.state === 'playing' || game.state === 'paused')) togglePause(); });
+  $('gh-quit').addEventListener('click', exitGame);
   $('btn-rebuild').addEventListener('click', () => rebuildPlanet());
   dom.viewGlobe.addEventListener('click', () => setView('globe'));
   dom.viewMap.addEventListener('click', () => setView('map'));
@@ -2170,6 +2799,7 @@
   document.addEventListener('visibilitychange', () => {
     last = performance.now();
     if (audio) { if (document.hidden) audio.pause(); else audio.resume(); }
+    if (document.hidden && game && game.state === 'playing') togglePause();
   });
 
   // ---------------------------------------------------------------------------
@@ -2185,6 +2815,10 @@
     stepTween(now);
     stepLapse(now);
     stepDoom(now);
+    if (game) {
+      try { stepGame(dt); }
+      catch (err) { exitGame(); if (!frame.reported) { frame.reported = true; setTimeout(() => { throw err; }); } }
+    }
     stepReset(now);
     if (climateDirty) recomputeClimate();
     if (statsDirty && now - lastStatsAt > 90) updateCard(false);
@@ -2219,7 +2853,7 @@
 
     dom.clock.textContent = 'Day ' + (Math.floor(view.spin / (Math.PI * 2)) + 1);
 
-    const animating = moving || drag || pinch || fade || introStart >= 0 || tween || lapse || resetAnim || builder || doom;
+    const animating = moving || drag || pinch || fade || introStart >= 0 || tween || lapse || resetAnim || builder || doom || game;
     if (animating || dirty) {
       try { draw(now); }
       catch (err) {
@@ -2269,5 +2903,13 @@
     get ready() { return !!planet && !builder && !climateDirty; },
     setSeed: (s) => { dom.seed.value = Terra.normalizeSeed(s); return requestSeed(s); },
     get quality() { return Math.round(qualityCap); },
+    get game() {
+      return game ? { state: game.state, score: game.score, lives: game.lives, wave: game.wave, combo: game.combo, meteors: game.meteors.length, craters: game.craters.length } : null;
+    },
+    gameTargets() {
+      if (!game) return [];
+      const rect = dom.canvas.getBoundingClientRect();
+      return game.meteors.map((m) => { const p = meteorPos(m); return { x: rect.left + p.x, y: rect.top + p.y, kind: m.kind, power: !!m.power, k: p.k }; });
+    },
   };
 })();

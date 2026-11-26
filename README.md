@@ -16,6 +16,7 @@
 - Temperature, water level and terrain sliders reshape the planet live. A hot world spreads into deserts and a cold one freezes over. A climate time-lapse shows the ice caps advancing and retreating.
 - Each planet gets an ID card with a generated name, world type, habitability score and an explorer's log. Planets can be saved as postcards.
 - Every planet comes with a chain of 3 missions picked from its seed (for example "Freeze a third of the surface", then "Make it a Paradise"). A progress bar fills as you move the sliders; each completed mission sets off confetti, earns a star and unlocks the next, and finishing all three masters the world. Stars build your Terraformer rank (Cadet → Explorer → Pioneer → Terraformer → World-shaper → Star-forger).
+- **Planet Defense (the game):** press **Play** (or `D`). Meteors fly in from every side; click or tap them to blast them with a beam from the planet's surface before they hit. Boulders take three shots and split, golden streaks are fast, green orbs repair a shield and blue orbs clear the sky. Chain hits for up to ×8 combos; every wave is faster. Impacts leave craters and glowing cracks that turn with the planet, and after three hits the planet shatters to its molten core. Your best score is saved.
 - Meteor strike: call down a meteor shower, watch the crust crack and glow, the planet shatter into tumbling pieces and its molten core appear with labelled layers. The core belongs to its world: its size, layers and material come from the seed, it runs hotter on hotter planets, rugged terrain thickens the crust, oceans and ice add outer shells, and it reacts live to the sliders. Hover or tap a layer for its depth, temperature and material. Rebuild re-forms the same planet.
 - Every planet also has its own sound: an ambient hum whose chord comes from the seed, an ocean swell that follows the water level, and gentle sound effects for every control (mute with the speaker button or `A`).
 
@@ -62,6 +63,7 @@ Drag to spin, scroll or pinch to zoom, hover or tap to inspect a spot.
 | `T` | Climate time-lapse |
 | `A` | Sound on or off |
 | `H` | Photo mode (hide everything but the planet) |
+| `D` | Play Planet Defense (click or tap meteors; Space or Esc pauses) |
 | `K` | Meteor strike (press again to rebuild) |
 | `C`, `L`, `G` | Clouds, night lights, grid |
 | `1`–`6` | Climate presets |

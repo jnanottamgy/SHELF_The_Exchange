@@ -40,6 +40,9 @@
       </form>
 
       <div class="top-actions">
+        <button type="button" class="play-btn" id="btn-game" title="Play Planet Defense: shoot down meteors before they hit (D)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l11-6.5z"/></svg><span>Play</span>
+        </button>
         <div class="stars" id="stars" title="Stars earned by completing planet missions">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3L2.9 9.5l6.3-.9z"/></svg>
           <b id="stars-count">0</b><span class="stars-rank" id="stars-rank">Cadet</span>
@@ -253,12 +256,37 @@
         <div><kbd>A</kbd> Sound on or off</div>
         <div><kbd>H</kbd> Photo mode</div>
         <div><kbd>K</kbd> Meteor strike</div>
+        <div><kbd>D</kbd> Play Planet Defense</div>
         <div><kbd>1</kbd>–<kbd>6</kbd> Presets</div>
         <div><kbd>X</kbd> Reset sliders</div>
         <div><kbd>S</kbd> Share, <kbd>P</kbd> postcard</div>
       </div>
       <p class="help-foot">Run the self-checks any time: open <a href="tests.html">tests.html</a>.</p>
     </div>
+  </div>
+
+  <!-- ============ Planet Defense (arcade mode) ============ -->
+  <div class="game-ui" id="game-ui" aria-live="polite">
+    <div class="game-vignette" id="game-vignette"></div>
+    <div class="game-hud" id="game-hud">
+      <div class="gh-lives" id="gh-lives" aria-label="Shields">
+        <svg class="life" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5l8 3v6.2c0 4.6-3.3 8.4-8 9.8-4.7-1.4-8-5.2-8-9.8V5.5z"/></svg>
+        <svg class="life" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5l8 3v6.2c0 4.6-3.3 8.4-8 9.8-4.7-1.4-8-5.2-8-9.8V5.5z"/></svg>
+        <svg class="life" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.5l8 3v6.2c0 4.6-3.3 8.4-8 9.8-4.7-1.4-8-5.2-8-9.8V5.5z"/></svg>
+      </div>
+      <div class="gh-center">
+        <div class="gh-score" id="gh-score">0</div>
+        <div class="gh-meta"><span id="gh-wave">Wave 1</span><span class="gh-combo" id="gh-combo">×1</span></div>
+      </div>
+      <div class="gh-right">
+        <div class="gh-best">Best <b id="gh-best">0</b></div>
+        <button type="button" class="gh-btn" id="gh-pause" aria-label="Pause (Space)" title="Pause (Space)"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="5" width="3.5" height="14" rx="1"/><rect x="14" y="5" width="3.5" height="14" rx="1"/></svg></button>
+        <button type="button" class="gh-btn" id="gh-quit" aria-label="Quit the game (Esc)" title="Quit (Esc)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+      </div>
+    </div>
+    <div class="game-banner" id="game-banner"><div class="gb-title" id="gb-title"></div><div class="gb-sub" id="gb-sub"></div></div>
+    <div class="game-card" id="game-card" role="dialog" aria-modal="false" aria-labelledby="gc-title"></div>
+    <div class="game-tip" id="game-tip">Click or tap the meteors before they hit · Space or Esc to pause</div>
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>

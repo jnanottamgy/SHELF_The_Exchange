@@ -149,6 +149,25 @@
     crack() { whoosh(0.8, 300, 2600, 0.05); tone(70, 0, 0.9, 'sawtooth', 0.04, 45); },
     explode() { tone(90, 0, 1.6, 'sine', 0.3, 28); whoosh(1.8, 2400, 80, 0.22); whoosh(0.6, 5000, 1200, 0.08); },
     core() { tone(55, 0, 2.5, 'triangle', 0.08, 52); tone(82.4, 0.2, 2.3, 'sine', 0.05); },
+    // Planet Defense
+    zap() { tone(1500, 0, 0.08, 'square', 0.03, 380); tone(2600, 0, 0.05, 'sine', 0.03, 900); },
+    pop(level) {
+      const f = 1 + Math.min(12, level || 0) * 0.05;
+      whoosh(0.3, 2600 * f, 180, 0.1); tone(200 * f, 0, 0.22, 'sine', 0.15, 55); tone(900 * f, 0, 0.08, 'triangle', 0.05, 1350 * f);
+    },
+    clink() { tone(1900, 0, 0.05, 'triangle', 0.06, 1200); tone(500, 0, 0.07, 'square', 0.02, 300); },
+    miss() { tone(320, 0, 0.06, 'sine', 0.04, 210); },
+    hurt() { tone(80, 0, 1.0, 'sine', 0.34, 30); whoosh(0.7, 1200, 90, 0.2); tone(880, 0.05, 0.12, 'square', 0.035); tone(660, 0.22, 0.14, 'square', 0.035); },
+    wave() { [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => tone(f, i * 0.07, 0.22, 'triangle', 0.08)); },
+    start() { whoosh(0.9, 200, 3000, 0.06); [261.6, 329.6, 392, 523.25].forEach((f, i) => tone(f, i * 0.09, 0.45, 'sine', 0.07)); },
+    combo(level) { const f = 660 * Math.pow(2, Math.min(level || 1, 12) / 12); tone(f, 0, 0.12, 'sine', 0.08); tone(f * 1.5, 0.06, 0.14, 'sine', 0.06); },
+    power() { [1318.5, 1568, 1975.5, 2637].forEach((f, i) => tone(f, i * 0.05, 0.18, 'sine', 0.06)); },
+    nova() { whoosh(1.2, 300, 5000, 0.14); tone(110, 0, 1, 'sine', 0.2, 40); [523.25, 783.99, 1046.5].forEach((f, i) => tone(f, i * 0.06, 0.6, 'triangle', 0.06)); },
+    over() { [392, 311.1, 261.6, 196].forEach((f, i) => tone(f, i * 0.22, 0.6, 'triangle', 0.08)); tone(55, 0, 2, 'sine', 0.2, 30); },
+    pulse(n) {
+      const notes = [55, 55, 65.41, 49], f = notes[(n || 0) % 4];
+      tone(f, 0, 0.2, 'sine', 0.2, f * 0.7); tone(f * 2, 0, 0.09, 'triangle', 0.05); tone(f * 3, 0, 0.05, 'sine', 0.02);
+    },
     rebuild() { [1, 1.25, 1.5, 2].forEach((r, i) => tone(220 * r, i * 0.08, 0.8, 'sine', 0.06)); whoosh(1, 200, 2200, 0.05); },
   };
 
@@ -188,14 +207,16 @@
       pending.temp = temp; pending.water = water;
       applyClimate(false);
     },
-    sfx(name) {
+    /** Lowers the ambient hum (used while the arcade game runs). */
+    duck(on) { if (ctx) { ramp(padBus.gain, on ? 0.018 : 0.055, 0.6); ramp(oceanGain.gain, on ? 0.008 : 0.012 + Math.max(0, Math.min(100, pending.water)) / 100 * 0.05, 0.6); } },
+    sfx(name, arg) {
       if (!ctx || !enabled || !started || ctx.state !== 'running' || !SFX[name]) return;
       if (name === 'tick') {
         const t = now();
         if (t - lastTick < 0.06) return;
         lastTick = t;
       }
-      try { SFX[name](); } catch (e) { /* never let sound break the app */ }
+      try { SFX[name](arg); } catch (e) { /* never let sound break the app */ }
     },
     pause() { if (ctx && ctx.state === 'running') ctx.suspend().catch(() => {}); },
     resume() { if (ctx && enabled && started && ctx.state === 'suspended') ctx.resume().catch(() => {}); },
