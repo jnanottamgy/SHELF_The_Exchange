@@ -18,7 +18,7 @@
   // Constants
   // ---------------------------------------------------------------------------
 
-  const DEFAULT_SEED = 'terra';
+  const DEFAULT_SEED = 'blue marble';
   const MAX_SEED_LENGTH = 200;
   const ELEV_SCALE = 8000;      // metres of ocean depth per unit of raw elevation
   const LAND_SCALE = 11000;     // land height in metres = LAND_SCALE * d^1.5
@@ -346,7 +346,7 @@
     const o = new Float64Array(30);
     for (let i = 0; i < o.length; i++) o[i] = (rand() * 2 - 1) * 64;
 
-    const contFreq = 0.85 + rand() * 0.9;
+    const contFreq = 0.6 + rand() * 0.7;
     const warpAmt = 0.25 + rand() * 0.45;
     const mtnFreq = 1.7 + rand() * 1.3;
     const moistFreq = 1.1 + rand() * 0.9;
@@ -362,7 +362,7 @@
     const hasRings = rand() < 0.24;
     const ringPalette = [[226, 210, 182], [196, 210, 228], [232, 188, 146], [214, 196, 222]];
     const ringColor = ringPalette[Math.floor(rand() * ringPalette.length) % ringPalette.length];
-    const ringInner = 1.32 + rand() * 0.18, ringOuter = 1.95 + rand() * 0.45;
+    const ringInner = 1.28 + rand() * 0.14, ringOuter = 1.78 + rand() * 0.3;
     const ringBands = [];
     for (let i = 0; i < 18; i++) ringBands.push(0.15 + rand() * 0.75);
 
@@ -435,7 +435,9 @@
 
         const X = cl * colSin[x], Y = sl, Z = cl * colCos[x];
         const qx = X + wx * warpAmt, qy = Y + wy * warpAmt, qz = Z + wz * warpAmt;
-        cont[i] = fbm(nA, qx * contFreq + o[9], qy * contFreq + o[10], qz * contFreq + o[11], 5);
+        // A very low-frequency swell groups land into a few large continents.
+        cont[i] = 0.62 * fbm(nA, qx * contFreq + o[9], qy * contFreq + o[10], qz * contFreq + o[11], 5) +
+          0.42 * nB(X * 0.62 + o[27], Y * 0.62 + o[28], Z * 0.62 + o[29]);
         mtn[i] = ridged(nC, qx * mtnFreq + o[12], qy * mtnFreq + o[13], qz * mtnFreq + o[14], 4);
         det[i] = fbm(nB, X * 7 + o[15], Y * 7 + o[16], Z * 7 + o[17], 2);
         city[i] = nC(X * 19 + o[24], Y * 19 + o[25], Z * 19 + o[26]);
@@ -459,7 +461,7 @@
     // Work units, weighted roughly by cost per row.
     const phases = [
       { rows: LH, fn: lowRow, cost: LW * 7 },
-      { rows: H, fn: fullRow, cost: W * 12 },
+      { rows: H, fn: fullRow, cost: W * 13 },
       { rows: CH, fn: cloudRow, cost: CW * 9 },
     ];
     const total = phases.reduce((t, p) => t + p.rows * p.cost, 0);
@@ -647,18 +649,20 @@
           }
         } else {
           water[i] = 0;
-          // Land heights are curved so lowlands stay low and peaks stay tall.
-          const d = e - sl;
-          em = LAND_SCALE * d * Math.sqrt(d);
+          // Heights are measured from the datum (sea level, or the median
+          // ground on dry worlds) and curved so lowlands stay low.
           const dr = e - lapseRef;
-          T = Tsea - (dr > 0 ? (LAPSE * LAND_SCALE * dr * Math.sqrt(dr)) / 1000 : 0);
+          em = dr >= 0 ? LAND_SCALE * dr * Math.sqrt(dr) : -LAND_SCALE * -dr * Math.sqrt(-dr);
+          T = Tsea - (dr > 0 ? (LAPSE * em) / 1000 : 0);
+          const ds = e - sl;
+          const aboveSea = LAND_SCALE * ds * Math.sqrt(ds);
           let me = 0.62 * (moist[i] * 1.25 + 0.5) + 0.38 * moistLat + (wf - 0.55) * 0.35 - Math.max(0, T - 24) * 0.022;
           me = clamp(me, 0, 1);
           if (T > 52) b = BIOME.SCORCHED;
           else if (T < -18) b = BIOME.ICE;
           else if (T < -5) b = BIOME.SNOW;
           else if (em > 4300 && T < 30) b = BIOME.MOUNTAIN;
-          else if (em < 30 && T > 1) b = BIOME.BEACH;
+          else if (aboveSea < 30 && wf > 0 && T > 1) b = BIOME.BEACH;
           else if (T < 3) b = BIOME.TUNDRA;
           else if (T < 9) b = me > 0.45 ? BIOME.TAIGA : BIOME.TUNDRA;
           else if (T < 22) b = me < 0.25 ? BIOME.DESERT : me < 0.5 ? BIOME.GRASSLAND : BIOME.FOREST;
@@ -688,6 +692,8 @@
         rgb[o3 + 2] = bl > 255 ? 255 : bl < 0 ? 0 : bl;
       }
     }
+
+    softenLand(out, planet, sl);
 
     const frac = Array.from(area, (a) => a / totalWeight);
     const waterFrac = frac[0] + frac[1] + frac[2] + frac[3];
@@ -724,9 +730,9 @@
     }
 
     // Clouds: wetter worlds are cloudier; scorching, dry worlds clear up.
-    const cov = clamp(0.08 + 0.42 * wf - Math.max(0, base - 32) * 0.008 + (base < -10 ? -0.04 : 0), 0.03, 0.55);
+    const cov = clamp(0.05 + 0.36 * wf - Math.max(0, base - 32) * 0.008 + (base < -10 ? -0.04 : 0), 0.02, 0.45);
     const cr = planet.cloudRaw, clouds = out.clouds;
-    const lo = 0.22 - cov * 0.62, inv = 1 / 0.32;
+    const lo = 0.24 - cov * 0.62, inv = 1 / 0.42;
     let cloudSum = 0;
     for (let j = 0; j < cr.length; j++) {
       const v = (cr[j] - lo) * inv;
@@ -756,6 +762,34 @@
     return out;
   }
 
+  /**
+   * Light 3x3 blur of land colours (never across a coastline), so biome
+   * borders read as natural gradients instead of hard texel steps.
+   */
+  function softenLand(out, planet, sl) {
+    const { W, H } = planet;
+    const h = out.height, rgb = out.rgb;
+    if (!out.rgbTmp || out.rgbTmp.length !== rgb.length) out.rgbTmp = new Uint8Array(rgb.length);
+    const src = out.rgbTmp;
+    src.set(rgb);
+    for (let y = 1; y < H - 1; y++) {
+      const up = (y - 1) * W, row = y * W, dn = (y + 1) * W;
+      for (let x = 0; x < W; x++) {
+        const i = row + x;
+        if (h[i] < sl) continue;
+        const l = x > 0 ? x - 1 : W - 1, r = x < W - 1 ? x + 1 : 0;
+        if (h[row + l] < sl || h[row + r] < sl || h[up + x] < sl || h[dn + x] < sl ||
+            h[up + l] < sl || h[up + r] < sl || h[dn + l] < sl || h[dn + r] < sl) continue;
+        const a = (up + l) * 3, b = (up + x) * 3, c = (up + r) * 3, d = (row + l) * 3, e = i * 3, f = (row + r) * 3,
+          g = (dn + l) * 3, k = (dn + x) * 3, m = (dn + r) * 3;
+        for (let ch = 0; ch < 3; ch++) {
+          rgb[e + ch] = (src[a + ch] + src[c + ch] + src[g + ch] + src[m + ch] +
+            2 * (src[b + ch] + src[d + ch] + src[f + ch] + src[k + ch]) + 4 * src[e + ch] + 8) >> 4;
+        }
+      }
+    }
+  }
+
   function atmosphereColor(st) {
     let c = [96, 166, 255];
     const mix = (to, k) => { c = [lerp(c[0], to[0], k), lerp(c[1], to[1], k), lerp(c[2], to[2], k)]; };
@@ -781,7 +815,7 @@
     else if (st.iceFrac > 0.55) cls = Wf > 0.6 ? 'Frozen Ocean World' : 'Ice World';
     else if (Wf >= 0.92) cls = 'Ocean World';
     else if (Wf >= 0.78) cls = 'Archipelago World';
-    else if (Wf <= 0.15 && land(BIOME.DESERT) + land(BIOME.SCORCHED) > 0.4) cls = 'Desert World';
+    else if (Wf <= 0.15) cls = land(BIOME.DESERT) + land(BIOME.SCORCHED) + land(BIOME.SAVANNA) * 0.5 > 0.35 ? 'Desert World' : 'Dry World';
     else if (land(BIOME.DESERT) + land(BIOME.SAVANNA) * 0.5 > 0.45) cls = 'Arid World';
     else if (land(BIOME.RAINFOREST) > 0.3 && land(BIOME.RAINFOREST) + land(BIOME.FOREST) > 0.5) cls = 'Jungle World';
     else if (land(BIOME.FOREST) + land(BIOME.TAIGA) > 0.5) cls = 'Forest World';
@@ -807,7 +841,7 @@
     else if (T > 26) notes.push('A hot world: ' + Math.round(T) + ' °C on average.');
     else if (T < -12) notes.push('Bring a very warm coat: it averages ' + Math.round(T) + ' °C.');
     else if (T < 2) notes.push('Cold and windswept, averaging ' + Math.round(T) + ' °C.');
-    else if (st.hasLand && st.peak > 1500) notes.push(planet.peakName + ' rises ' + Math.round(st.peak).toLocaleString('en-US') + ' m above sea level.');
+    else if (st.hasLand && st.peak > 1500) notes.push(planet.peakName + ' rises ' + Math.round(st.peak).toLocaleString('en-US') + ' m above ' + (Wf > 0.01 ? 'sea level.' : 'the plains.'));
     else notes.push('Mild climate, averaging ' + Math.round(T) + ' °C.');
     // 3. Life, rings or flora.
     if (st.civilization) notes.push('Lights glitter across the night side. Someone lives here.');

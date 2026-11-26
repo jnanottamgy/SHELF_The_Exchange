@@ -271,8 +271,9 @@ svg { display: block; }
   background: var(--panel-strong); border: 1px solid var(--stroke-strong);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
   pointer-events: auto; z-index: 2;
-  animation: drop-in .7s .35s var(--ease) both;
+  animation: drop-in-center .7s .35s var(--ease) backwards;
 }
+@keyframes drop-in-center { from { opacity: 0; transform: translate(-50%, -14px); } }
 .view-switch button {
   position: relative; z-index: 1;
   display: inline-flex; align-items: center; gap: 7px;
@@ -305,13 +306,15 @@ svg { display: block; }
 
 .hint {
   position: absolute; left: 50%; bottom: 76px; transform: translateX(-50%);
-  padding: 7px 14px; border-radius: 999px; white-space: nowrap;
+  width: max-content; max-width: calc(100% - 24px); text-align: center;
+  padding: 7px 14px; border-radius: 999px;
   background: rgba(10, 13, 30, .55); border: 1px solid var(--stroke);
   color: var(--muted); font-size: 12px; letter-spacing: .02em;
   transition: opacity .6s, transform .6s var(--ease);
   pointer-events: none; z-index: 2;
-  animation: drop-in .7s 1s var(--ease) both;
+  animation: hint-in .7s 1s var(--ease) backwards;
 }
+@keyframes hint-in { from { opacity: 0; transform: translate(-50%, 10px); } }
 .hint.gone { opacity: 0; transform: translate(-50%, 8px); }
 
 .hud {
@@ -320,9 +323,9 @@ svg { display: block; }
   border-radius: 999px; background: var(--panel-strong); border: 1px solid var(--stroke-strong);
   backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
   pointer-events: auto; z-index: 2;
-  animation: rise-in .7s .45s var(--ease) both;
+  animation: rise-in .7s .45s var(--ease) backwards;
 }
-@keyframes rise-in { from { opacity: 0; transform: translate(-50%, 14px); } to { opacity: 1; transform: translate(-50%, 0); } }
+@keyframes rise-in { from { opacity: 0; transform: translate(-50%, 14px); } }
 .hud-btn { width: 38px; height: 38px; border-radius: 50%; border-color: transparent; background: transparent; }
 #btn-play svg { fill: currentColor; stroke: none; }
 #btn-play .i-play { display: none; }

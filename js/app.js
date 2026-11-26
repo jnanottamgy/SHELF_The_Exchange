@@ -16,7 +16,7 @@
   // ---------------------------------------------------------------------------
   const TEX_W = 512;
   const INV_2PI = 1 / (2 * Math.PI), INV_PI = 1 / Math.PI, DEG = 180 / Math.PI;
-  const ZOOM_MIN = 0.55, ZOOM_MAX = 2.6;
+  const ZOOM_MIN = 0.55, ZOOM_MAX = 2.2;
   const PITCH_LIMIT = 1.35;
   const SUN = normalize3([-0.62, 0.22, 0.75]);      // sun direction, fixed in space
   const BUILD_BUDGET_MS = 9;                        // per-frame planet building budget
@@ -303,7 +303,7 @@
       if (wet > 0.02 && ndl > 0) {
         const nh = vx * hx + vy * hy + vz * hz;
         if (nh > 0.82) {
-          const s = (Math.pow(nh, 120) * 0.8 + Math.pow(nh, 14) * 0.09) * day * wet;
+          const s = (Math.pow(nh, 160) * 0.55 + Math.pow(nh, 16) * 0.08) * day * wet;
           R += 255 * s; G += 246 * s; B += 222 * s;
         }
       }
@@ -330,7 +330,7 @@
         const cr = (clouds[q0 + cx0] * (1 - cfx) + clouds[q0 + cx1] * cfx) * (1 - cfy) +
           (clouds[q1 + cx0] * (1 - cfx) + clouds[q1 + cx1] * cfx) * cfy;
         if (cr > 0) {
-          const cd = cr >= 1 ? 0.9 : cr * cr * (3 - 2 * cr) * 0.9;
+          const cd = cr >= 1 ? 0.78 : cr * cr * (3 - 2 * cr) * 0.78;
           const cl = 0.035 + day * (0.5 + 0.55 * diff);
           R += (248 * cl - R) * cd; G += (250 * cl - G) * cd; B += (255 * cl - B) * cd;
         }
@@ -508,8 +508,14 @@
     }
   }
 
+  /** Planet radius in CSS pixels; ringed planets shrink a little so the rings fit. */
+  function globeRadius() {
+    const ringed = planet && planet.traits.rings;
+    return layout.baseR * (ringed ? 0.84 : 1) * view.zoom;
+  }
+
   function drawGlobe(introK, pulse) {
-    const R = layout.baseR * view.zoom * (0.6 + 0.4 * introK) * pulse;
+    const R = globeRadius() * (0.6 + 0.4 * introK) * pulse;
     const { cx, cy } = layout;
     const target = clamp(Math.round(2 * R * dpr), 64, Math.round(qualityCap));
     const disc = getDisc(target);
@@ -934,7 +940,7 @@
     const x = clientX - rect.left, y = clientY - rect.top;
     let tx, ty, ndl;
     if (state.view === 'globe') {
-      const R = layout.baseR * view.zoom;
+      const R = globeRadius();
       const dx = (x - layout.cx) / R, dy = (y - layout.cy) / R;
       const d2 = dx * dx + dy * dy;
       if (d2 > 1) return null;
@@ -977,7 +983,9 @@
     dom.tipSwatch.style.backgroundColor = biomeCss(b.id);
     dom.tipBiome.textContent = b.name;
     const e = Math.round(info.elev);
-    dom.tipElev.textContent = e >= 0 ? e.toLocaleString('en-US') + ' m' : Math.abs(e).toLocaleString('en-US') + ' m deep';
+    dom.tipElev.textContent = info.biome.water
+      ? Math.abs(e).toLocaleString('en-US') + ' m deep'
+      : (e < 0 ? '−' : '') + Math.abs(e).toLocaleString('en-US') + ' m';
     const t = Math.round(info.temp);
     dom.tipTemp.textContent = (t > 0 ? '+' : t < 0 ? '−' : '') + Math.abs(t) + ' °C';
     const hh = Math.floor(info.localTime), mm = Math.floor((info.localTime - hh) * 60);
@@ -1040,7 +1048,7 @@
         const dt = Math.max(1, now - drag.t) / 1000;
         if (Math.abs(e.clientX - drag.sx) + Math.abs(e.clientY - drag.sy) > 4) drag.moved = true;
         if (state.view === 'globe') {
-          const R = Math.max(40, layout.baseR * view.zoom);
+          const R = Math.max(40, globeRadius());
           const ry = dx / R, rp = dy / R;
           view.yaw += ry;
           view.pitch = clamp(view.pitch + rp, -PITCH_LIMIT, PITCH_LIMIT);
@@ -1496,6 +1504,9 @@
   resize();
   requestSeed(state.seed);
   lastHash = location.hash;
+  if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) {
+    dom.hint.textContent = 'Drag to spin · Pinch to zoom · Tap to inspect';
+  }
   if (reduceMotion) dom.hint.classList.add('gone');
   setTimeout(() => dom.hint.classList.add('gone'), 9000);
   window.addEventListener('load', positionGlider);

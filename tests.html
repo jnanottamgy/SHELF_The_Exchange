@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Tiny Terra · Self-checks</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='26' fill='%2334d399'/%3E%3Cpath d='M20 33l8 8 16-18' stroke='%23052e1a' stroke-width='6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+  <style>
+    :root { --bg: #04050d; --text: #eaf0ff; --muted: #9aa5cc; --faint: #626c95; --stroke: rgba(150,175,255,.14);
+      --good: #34d399; --bad: #fb7185; --accent: #6ee7ff;
+      --font: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+      --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; color: var(--text); font: 14px/1.5 var(--font);
+      background: radial-gradient(900px 600px at 80% 0%, rgba(76,52,160,.22), transparent 60%),
+                  radial-gradient(800px 600px at 0% 100%, rgba(14,116,144,.18), transparent 60%), var(--bg); }
+    main { max-width: 880px; margin: 0 auto; padding: 40px 20px 60px; }
+    .top { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+    .eyebrow { color: var(--accent); font-size: 11px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase; }
+    h1 { margin: 6px 0 4px; font-size: 32px; letter-spacing: -.01em; }
+    p.lead { margin: 0; color: var(--muted); max-width: 560px; }
+    a { color: var(--accent); }
+    .back { display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 999px;
+      border: 1px solid var(--stroke); text-decoration: none; color: var(--text); font-weight: 600; background: rgba(255,255,255,.04); }
+    .back:hover { border-color: rgba(110,231,255,.5); }
+    .summary { margin: 28px 0 8px; display: flex; align-items: center; gap: 18px; padding: 18px 20px; border-radius: 18px;
+      border: 1px solid var(--stroke); background: rgba(14,19,42,.7); }
+    .big { font: 800 40px/1 var(--mono); }
+    .big.ok { color: var(--good); } .big.fail { color: var(--bad); }
+    .bar { flex: 1; height: 10px; border-radius: 99px; background: rgba(255,255,255,.06); overflow: hidden; }
+    .bar span { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--good)); transition: width .2s; }
+    .status { color: var(--muted); font-size: 13px; min-width: 150px; text-align: right; }
+    h2 { font-size: 11px; letter-spacing: .16em; text-transform: uppercase; color: var(--faint); margin: 26px 0 8px; }
+    ul { list-style: none; margin: 0; padding: 0; border: 1px solid var(--stroke); border-radius: 16px; overflow: hidden; background: rgba(10,13,30,.6); }
+    li { display: grid; grid-template-columns: 26px 1fr auto; gap: 10px; align-items: start; padding: 11px 16px; border-top: 1px solid var(--stroke); }
+    li:first-child { border-top: 0; }
+    .mark { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; font-size: 12px; font-weight: 800; margin-top: 1px; }
+    .ok .mark { background: rgba(52,211,153,.15); color: var(--good); }
+    .fail .mark { background: rgba(251,113,133,.15); color: var(--bad); }
+    .detail { display: block; color: var(--muted); font-family: var(--mono); font-size: 12px; margin-top: 2px; }
+    .fail .detail { color: #fecdd3; }
+    .ms { color: var(--faint); font-family: var(--mono); font-size: 12px; }
+    footer { margin-top: 28px; color: var(--faint); font-size: 12.5px; }
+    code { font-family: var(--mono); color: #cbd5ff; }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="top">
+      <div>
+        <div class="eyebrow">Tiny Terra · quality</div>
+        <h1>Self-checks</h1>
+        <p class="lead">These checks run the real planet engine in your browser: determinism, hostile seeds, every slider extreme, tampered share links and speed.</p>
+      </div>
+      <a class="back" href="index.html">← Back to the planet</a>
+    </div>
+
+    <div class="summary" role="status" aria-live="polite">
+      <div class="big" id="count">0/0</div>
+      <div class="bar" aria-hidden="true"><span id="bar"></span></div>
+      <div class="status" id="status">Running…</div>
+    </div>
+
+    <div id="groups"></div>
+
+    <footer>Also runs from a terminal: <code>node js/tests.js</code></footer>
+  </main>
+
+  <script src="js/terra.js"></script>
+  <script src="js/tests.js"></script>
+  <script>
+    (function () {
+      'use strict';
+      var groups = document.getElementById('groups');
+      var lists = {};
+      var passed = 0;
+      function listFor(name) {
+        if (lists[name]) return lists[name];
+        var h = document.createElement('h2'); h.textContent = name;
+        var ul = document.createElement('ul');
+        groups.appendChild(h); groups.appendChild(ul);
+        lists[name] = ul;
+        return ul;
+      }
+      if (!window.Terra || !window.TerraTests) {
+        document.getElementById('status').textContent = 'Could not load the engine files.';
+        return;
+      }
+      setTimeout(function () {
+        TerraTests.runAll(window.Terra, function (r, i, total) {
+          if (r.ok) passed++;
+          var li = document.createElement('li');
+          li.className = r.ok ? 'ok' : 'fail';
+          var mark = document.createElement('span'); mark.className = 'mark'; mark.textContent = r.ok ? '✓' : '✗';
+          var body = document.createElement('span'); body.textContent = r.name;
+          if (r.detail) { var d = document.createElement('span'); d.className = 'detail'; d.textContent = r.detail; body.appendChild(d); }
+          var ms = document.createElement('span'); ms.className = 'ms'; ms.textContent = Math.round(r.ms) + ' ms';
+          li.appendChild(mark); li.appendChild(body); li.appendChild(ms);
+          listFor(r.group).appendChild(li);
+          document.getElementById('count').textContent = passed + '/' + i;
+          document.getElementById('bar').style.width = (i / total * 100) + '%';
+          document.getElementById('status').textContent = 'Running ' + i + ' of ' + total + '…';
+        }, function (all) {
+          var failed = all.length - passed;
+          var count = document.getElementById('count');
+          count.className = 'big ' + (failed ? 'fail' : 'ok');
+          count.textContent = passed + '/' + all.length;
+          document.getElementById('status').textContent = failed ? failed + ' failed' : 'All checks passed';
+          document.title = (failed ? '✗ ' : '✓ ') + 'Tiny Terra · Self-checks';
+        });
+      }, 60);
+    })();
+  </script>
+</body>
+</html>
