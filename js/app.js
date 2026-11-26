@@ -1900,11 +1900,12 @@
       if (landing.temp[k] < -9) return B.SEA_ICE;
       return depth < 220 ? B.SHALLOW : depth < 2600 ? B.OCEAN : B.DEEP;
     }
-    const dr = Math.max(0, e - landing.datum), em = 11000 * dr * Math.sqrt(dr);
-    const d0 = Math.max(0, landing.base[k] - landing.datum), em0 = 11000 * d0 * Math.sqrt(d0);
+    const LSC = climate.landScale || 11000;
+    const dr = Math.max(0, e - landing.datum), em = LSC * dr * Math.sqrt(dr);
+    const d0 = Math.max(0, landing.base[k] - landing.datum), em0 = LSC * d0 * Math.sqrt(d0);
     const T = landing.temp[k] - 6.5 * (em - em0) / 1000; // raised land gets colder
     landing.em[k] = em; landing.tNow[k] = T;
-    const ds = e - sl, above = 11000 * ds * Math.sqrt(ds), me = landing.wet[k];
+    const ds = e - sl, above = LSC * ds * Math.sqrt(ds), me = landing.wet[k];
     if (T > 52) return B.SCORCHED;
     if (T < -18) return B.ICE;
     if (T < -5) return B.SNOW;
@@ -1987,7 +1988,11 @@
       const b = document.createElement('button');
       b.type = 'button'; b.dataset.tool = t.id;
       b.textContent = (idx + 1) + ' · ' + t.label;
-      b.addEventListener('click', () => setLandTool(t.id));
+      b.addEventListener('click', () => {
+        setLandTool(t.id);
+        // On foot, a tool button acts at the crosshair (the same as keys 1-5), so touch users can build too.
+        if (landing.view === '3d' && landing.pl) { const c = aheadCell(); applyLandTool(c.x, c.y, true); }
+      });
       tools.appendChild(b);
     });
     const reset = document.createElement('button');
@@ -2009,7 +2014,14 @@
     landing.cvs.addEventListener('pointerdown', (e) => {
       if (e.pointerType === 'mouse' && e.button !== 0) return;
       try { landing.cvs.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
-      if (landing.view === '3d') { landing.look = { x: e.clientX, y: e.clientY }; return; }
+      if (landing.view === '3d') {
+        // Touch: left part of the view is a walking joystick, the rest drags to look.
+        const r = landing.cvs.getBoundingClientRect();
+        if (e.pointerType !== 'mouse' && e.clientX < r.left + r.width * 0.42 && !landing.joy) {
+          landing.joy = { id: e.pointerId, ox: e.clientX, oy: e.clientY, x: 0, y: 0 };
+        } else landing.look = { id: e.pointerId, x: e.clientX, y: e.clientY };
+        return;
+      }
       landing.painting = true;
       const p = cellAt(e);
       landing.pointer = p;
@@ -2017,10 +2029,15 @@
     });
     landing.cvs.addEventListener('pointermove', (e) => {
       if (landing.view === '3d') {
-        if (landing.look && landing.pl) {
+        if (landing.joy && e.pointerId === landing.joy.id) {
+          landing.joy.x = clamp((e.clientX - landing.joy.ox) / 55, -1, 1);
+          landing.joy.y = clamp((e.clientY - landing.joy.oy) / 55, -1, 1);
+          return;
+        }
+        if (landing.look && landing.pl && (landing.look.id === undefined || landing.look.id === e.pointerId)) {
           landing.pl.a += (e.clientX - landing.look.x) * 0.006;
           landing.pl.pitch = clamp(landing.pl.pitch - (e.clientY - landing.look.y) * 0.0022, -0.45, 0.6);
-          landing.look = { x: e.clientX, y: e.clientY };
+          landing.look = { id: landing.look.id, x: e.clientX, y: e.clientY };
         }
         return;
       }
@@ -2028,7 +2045,11 @@
       landing.pointer = p;
       if (landing.painting) applyLandTool(p.x, p.y, false);
     });
-    const stop = () => { landing.painting = false; landing.look = null; };
+    const stop = (e) => {
+      landing.painting = false;
+      if (landing.joy && (!e || e.pointerId === landing.joy.id)) landing.joy = null;
+      if (landing.look && (!e || landing.look.id === undefined || landing.look.id === e.pointerId)) landing.look = null;
+    };
     landing.cvs.addEventListener('pointerup', stop);
     landing.cvs.addEventListener('pointercancel', stop);
     landing.cvs.addEventListener('pointerleave', () => { landing.pointer = null; });
@@ -2623,8 +2644,9 @@
     // --- movement -----------------------------------------------------------
     const run = ks.has('shift') ? 2.3 : 1;
     P.a += ((ks.has('arrowright') ? 1 : 0) - (ks.has('arrowleft') ? 1 : 0)) * 1.9 * dt;
-    const fwd = (ks.has('arrowup') || ks.has('w') ? 1 : 0) - (ks.has('arrowdown') || ks.has('s') ? 1 : 0);
-    const str = (ks.has('d') ? 1 : 0) - (ks.has('a') ? 1 : 0);
+    const joy = landing.joy;
+    const fwd = clamp((ks.has('arrowup') || ks.has('w') ? 1 : 0) - (ks.has('arrowdown') || ks.has('s') ? 1 : 0) - (joy ? joy.y : 0), -1, 1);
+    const str = clamp((ks.has('d') ? 1 : 0) - (ks.has('a') ? 1 : 0) + (joy ? joy.x : 0), -1, 1);
     const ca = Math.cos(P.a), sa = Math.sin(P.a);
     const sp = 8 * run * dt;
     P.x += (ca * fwd - sa * str) * sp;
@@ -2853,6 +2875,14 @@
     g.fillRect(0, 0, CW, CH);
 
     if (wx.precip) drawPrecip(g, CW, CH, sys, dt, wx.precip, dayK);
+    if (landing.joy) {
+      const r = landing.cvs.getBoundingClientRect(), d = landing.dpr || 1;
+      const ox = (landing.joy.ox - r.left) * d, oy = (landing.joy.oy - r.top) * d, R = 46 * d;
+      g.strokeStyle = 'rgba(255,255,255,0.45)'; g.lineWidth = 2 * d;
+      g.beginPath(); g.arc(ox, oy, R, 0, Math.PI * 2); g.stroke();
+      g.fillStyle = 'rgba(255,255,255,0.55)';
+      g.beginPath(); g.arc(ox + landing.joy.x * R, oy + landing.joy.y * R, 16 * d, 0, Math.PI * 2); g.fill();
+    }
 
     // Crosshair marks where tools 1-5 will act.
     g.strokeStyle = 'rgba(255,255,255,0.7)';
@@ -2891,7 +2921,8 @@
     if (landing.viewBtn) landing.viewBtn.textContent = is3d ? 'Map and tools (M)' : 'Walk around (M)';
     if (landing.hintEl) {
       landing.hintEl.textContent = is3d
-        ? 'Arrows walk and turn · A/D strafe · Shift run · Space jump · drag to look · , and . move the clock an hour · F/G sea level · 1–5 tools'
+        ? (coarse ? 'Left thumb walks · right thumb looks · tool buttons act where you look'
+          : 'Arrows walk and turn · A/D strafe · Shift run · Space jump · drag to look · , and . move the clock an hour · F/G sea level · 1–5 tools')
         : 'WASD or arrow keys fly the ship · click or drag to use a tool · 1–5 pick a tool · , and . move the clock · F/G raise or lower the sea';
     }
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
@@ -2902,7 +2933,7 @@
   /** Height in metres above the current local sea level (negative = depth). */
   function heightAboveSea(k) {
     const d = landing.h[k] - landing.sl;
-    return d >= 0 ? 11000 * d * Math.sqrt(d) : d * 8000;
+    return d >= 0 ? (climate.landScale || 11000) * d * Math.sqrt(d) : d * 8000;
   }
 
   function landKey(e) {

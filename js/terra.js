@@ -610,6 +610,8 @@
     // Altitude cooling is measured from sea level, or from the median ground
     // height on dry worlds, so a low ocean does not make the whole world cold.
     const lapseRef = Math.max(sl, out.median);
+    // Relief scales with terrain variation below the midpoint, so "rolling plains" stay low.
+    const LS = LAND_SCALE * (0.3 + 0.7 * Math.min(1, s.terrain / 50));
     const base = s.temp;
     const biome = out.biome, temp = out.temp, elev = out.elev, rgb = out.rgb, water = out.water;
 
@@ -655,10 +657,10 @@
           // Heights are measured from the datum (sea level, or the median
           // ground on dry worlds) and curved so lowlands stay low.
           const dr = e - lapseRef;
-          const emRel = dr >= 0 ? LAND_SCALE * dr * Math.sqrt(dr) : -LAND_SCALE * -dr * Math.sqrt(-dr);
+          const emRel = dr >= 0 ? LS * dr * Math.sqrt(dr) : -LS * -dr * Math.sqrt(-dr);
           T = Tsea - (dr > 0 ? (LAPSE * emRel) / 1000 : 0);
           const ds = e - sl;
-          const aboveSea = LAND_SCALE * ds * Math.sqrt(ds);
+          const aboveSea = LS * ds * Math.sqrt(ds);
           // Shown heights are above sea level; with no ocean at all, above the median ground.
           em = wf > 0 ? aboveSea : emRel;
           let me = 0.62 * (moist[i] * 1.25 + 0.5) + 0.38 * moistLat + (wf - 0.55) * 0.35 - Math.max(0, T - 24) * 0.022;
@@ -767,6 +769,7 @@
     out.stats = stats;
     out.settings = s;
     out.seaLevel = sl;
+    out.landScale = LS;
     return out;
   }
 
