@@ -593,7 +593,7 @@
     const swirls = [];
     for (let i = 0; i < 26; i++) swirls.push({ r: rnd(0.6, 0.9), a: rnd(0, Math.PI * 2), len: rnd(0.3, 1.1), w: rnd(0.006, 0.02), light: Math.random() < 0.5 });
     doom = { start: performance.now(), impacts, swirls, exploded: false, explodeAt: 0, cracked: false, coreShown: false,
-      shards: null, debris: null, shake: 0, coreTemp: 4600 + (planet.hash % 1600) };
+      shards: null, debris: null, shake: 0, model: null, coreGeom: null };
     view.vyaw = 0; view.vpitch = 0;
     setDoomUi(true);
     // On phones the button sits below the planet: bring the planet into view.
@@ -631,7 +631,8 @@
       doom.coreShown = true;
       document.body.classList.add('doomed');
       sfx('core');
-      toast('Planet destroyed. Its molten core is exposed. Rebuild it any time (K).', 4200);
+      const m = coreModel();
+      toast('Planet destroyed. Its ' + m.comp + ' core burns at ' + m.innerTemp.toLocaleString('en-US') + ' °C. Hover the layers, move the sliders, or rebuild (K).', 5200);
     }
   }
 
@@ -757,85 +758,186 @@
     sfx('explode');
   }
 
-  function coreLabels() {
-    return [
-      ['Crust', 'shattered', 0.95],
-      ['Mantle', 'molten rock · ~3,000 °C', 0.74],
-      ['Outer core', 'liquid iron and nickel', 0.42],
-      ['Inner core', 'solid iron · ' + doom.coreTemp.toLocaleString('en-US') + ' °C', 0.1],
-    ];
+  /**
+   * The core is a function of the world: its proportions and composition come
+   * from the seed, and it reacts live to the climate. Temperature heats it,
+   * terrain thickens and roughens the crust, water and ice add surface layers,
+   * exotic flora means an exotic core, and a ringed planet keeps a debris ring.
+   */
+  const COMPOSITIONS = ['iron-nickel', 'iron-sulfur', 'iron-silicate', 'nickel-cobalt'];
+  function coreModel() {
+    const r = Terra.mulberry32((planet.hash ^ 0xc0ffee) >>> 0);
+    const st = climate.stats, t = planet.traits;
+    const radiusKm = Math.round(3200 + r() * 4600);
+    const inner = 0.17 + r() * 0.13;
+    const outer = inner + 0.17 + r() * 0.12;
+    const crust = 0.022 + (state.terrain / 100) * 0.05;                    // rugged worlds, thick crust
+    const exotic = t.flora !== 'Green';
+    const comp = exotic ? 'crystalline ' + t.flora.replace('Exotic ', '') : COMPOSITIONS[Math.floor(r() * COMPOSITIONS.length)];
+    const seedHeat = 4300 + r() * 1500;
+    const innerTemp = Math.round(seedHeat + state.temp * 22 + st.avgTemp * 4);
+    const mantleTemp = Math.round(innerTemp * 0.52 + state.temp * 9);
+    const heat = clamp((innerTemp - 3600) / 3400, 0, 1);                   // 0 = cold core, 1 = blazing
+    const hueShift = exotic ? t.floraShift * 0.25 : 0;
+    return {
+      radiusKm, inner, outer, crust, comp, exotic, innerTemp, mantleTemp, heat, hueShift,
+      ocean: st.waterFrac > 0.005 ? 0.006 + st.waterFrac * 0.022 : 0,       // ocean shell thickness
+      ice: st.iceFrac > 0.05 ? 0.004 + st.iceFrac * 0.016 : 0,
+      jag: 0.004 + (state.terrain / 100) * 0.018,                           // crust roughness
+      rings: !!t.rings, ringColor: t.ringColor,
+      crustKm: Math.round(radiusKm * crust * 2.4),
+      mantleKm: Math.round(radiusKm * (1 - crust - outer)),
+      outerKm: Math.round(radiusKm * (outer - inner)),
+      innerKm: Math.round(radiusKm * inner),
+    };
+  }
+
+  function mixRgb(a, b, k) { return 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * k) + ',' + Math.round(a[1] + (b[1] - a[1]) * k) + ',' + Math.round(a[2] + (b[2] - a[2]) * k) + ')'; }
+  function tint(c, deg) {
+    if (!deg) return 'rgb(' + c[0] + ',' + c[1] + ',' + c[2] + ')';
+    const hsl = (function (r, g, b) { r /= 255; g /= 255; b /= 255; const mx = Math.max(r, g, b), mn = Math.min(r, g, b); let h = 0, s2 = 0; const l = (mx + mn) / 2; if (mx !== mn) { const d = mx - mn; s2 = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn); h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4; h *= 60; } return [h, s2, l]; })(c[0], c[1], c[2]);
+    return 'hsl(' + ((hsl[0] + deg) % 360 + 360) % 360 + ',' + Math.round(hsl[1] * 100) + '%,' + Math.round(hsl[2] * 100) + '%)';
+  }
+
+  /** Layer bands (fractions of the planet radius), outermost first. */
+  function coreLayers(m) {
+    const fmt = (n) => n.toLocaleString('en-US');
+    const layers = [];
+    if (m.ice) layers.push({ name: 'Ice shell', detail: 'frozen seas', r0: 1, r1: 1 - m.ice, depth: '0–' + fmt(Math.round(m.radiusKm * m.ice * 3)) + ' km', temp: '−20 °C', comp: 'water ice' });
+    if (m.ocean) layers.push({ name: 'Ocean', detail: 'boiled away', r0: 1 - m.ice, r1: 1 - m.ice - m.ocean, depth: '0–' + fmt(Math.round(m.radiusKm * m.ocean * 2)) + ' km', temp: '—', comp: 'salt water' });
+    const top = 1 - m.ice - m.ocean;
+    layers.push({ name: 'Crust', detail: fmt(m.crustKm) + ' km thick', r0: top, r1: top - m.crust, depth: '0–' + fmt(m.crustKm) + ' km', temp: '200–900 °C', comp: 'basalt and granite' });
+    layers.push({ name: 'Mantle', detail: 'molten · ' + fmt(m.mantleTemp) + ' °C', r0: top - m.crust, r1: m.outer, depth: fmt(m.crustKm) + '–' + fmt(m.crustKm + m.mantleKm) + ' km', temp: fmt(m.mantleTemp) + ' °C', comp: 'molten silicate rock' });
+    layers.push({ name: 'Outer core', detail: 'liquid metal', r0: m.outer, r1: m.inner, depth: fmt(m.outerKm) + ' km thick', temp: fmt(Math.round(m.innerTemp * 0.82)) + ' °C', comp: 'liquid ' + m.comp });
+    layers.push({ name: 'Inner core', detail: 'solid · ' + fmt(m.innerTemp) + ' °C', r0: m.inner, r1: 0, depth: fmt(m.innerKm) + ' km radius', temp: fmt(m.innerTemp) + ' °C', comp: 'solid ' + m.comp });
+    return layers;
   }
 
   function drawCore(g, cx, cy, R, te, now) {
+    const m = coreModel();
+    doom.model = m;
+    const layers = coreLayers(m);
     const font = getComputedStyle(document.body).fontFamily;
-    // Make room for the labels inside the stage (never under the panels).
-    if (!doom.labelW) {
-      g.save(); let w = 0;
-      coreLabels().forEach((row) => {
-        g.font = '600 14px ' + font; w = Math.max(w, g.measureText(row[0]).width);
-        g.font = '400 12px ' + font; w = Math.max(w, g.measureText(row[1]).width);
-      });
-      g.restore();
-      doom.labelW = w + 30;
-    }
+    // Labels sit beside the core when there is room inside the stage, otherwise inside it.
+    g.save(); let lw = 0;
+    layers.forEach((L) => { g.font = '600 14px ' + font; lw = Math.max(lw, g.measureText(L.name).width); g.font = '400 12px ' + font; lw = Math.max(lw, g.measureText(L.detail).width); });
+    g.restore();
     const half = layout.stageW / 2 - 8;
-    const fit = (half - doom.labelW) / 1.15;
-    const target = fit >= R * 0.62 ? Math.min(R, fit) : R;
-    const showLabels = fit >= R * 0.62;
+    const fit = (half - lw - 30) / 1.15;
+    const side = fit >= R * 0.55;
+    const target = side ? Math.min(R, fit) : R * 0.9;
     const grow = easeOut(clamp(te / 1.4, 0, 1));
-    const s = 0.8 + 0.2 * grow;
-    const pulse = 1 + 0.035 * Math.sin(now * 0.004);
-    const rr = (R + (target - R) * grow) * s;
-    const halo = g.createRadialGradient(cx, cy, rr * 0.8, cx, cy, rr * 1.7);
-    halo.addColorStop(0, 'rgba(255,120,40,0.38)');
+    const pulse = 1 + 0.035 * Math.sin(now * (0.0025 + m.heat * 0.004));   // hotter cores throb faster
+    const rr = (R + (target - R) * grow) * (0.8 + 0.2 * grow);
+    doom.coreGeom = { cx, cy, rr };
+
+    // Heat halo grows with the core temperature.
+    const halo = g.createRadialGradient(cx, cy, rr * 0.8, cx, cy, rr * (1.4 + m.heat * 0.5));
+    halo.addColorStop(0, 'rgba(255,' + Math.round(90 + m.heat * 60) + ',40,' + (0.25 + m.heat * 0.2) + ')');
     halo.addColorStop(1, 'rgba(255,90,30,0)');
-    g.fillStyle = halo; g.beginPath(); g.arc(cx, cy, rr * 1.7, 0, Math.PI * 2); g.fill();
-    // Crust rim
-    g.fillStyle = '#2d211b'; g.beginPath(); g.arc(cx, cy, rr * 0.97, 0, Math.PI * 2); g.fill();
-    // Mantle
-    const mg = g.createRadialGradient(cx, cy, rr * 0.5, cx, cy, rr * 0.93);
-    mg.addColorStop(0, '#ff8a33'); mg.addColorStop(0.6, '#d9481c'); mg.addColorStop(1, '#7a1a10');
-    g.fillStyle = mg; g.beginPath(); g.arc(cx, cy, rr * 0.93, 0, Math.PI * 2); g.fill();
-    // Convection currents
-    g.save();
-    g.lineCap = 'round';
+    g.fillStyle = halo; g.beginPath(); g.arc(cx, cy, rr * 1.9, 0, Math.PI * 2); g.fill();
+
+    // Debris ring for ringed worlds.
+    if (m.rings) {
+      g.save(); g.translate(cx, cy); g.scale(1, 0.28); g.rotate(now * 0.00004);
+      const rc = m.ringColor;
+      for (let i = 0; i < 70; i++) {
+        const a = i * 2.39996, d = rr * (1.35 + ((i * 37) % 29) / 29 * 0.45);
+        g.fillStyle = 'rgba(' + rc[0] + ',' + rc[1] + ',' + rc[2] + ',0.55)';
+        g.beginPath(); g.arc(Math.cos(a) * d, Math.sin(a) * d, 1.2 + (i % 3), 0, Math.PI * 2); g.fill();
+      }
+      g.restore();
+    }
+
+    // Surface shells (ice, ocean) as thin rims.
+    let r0 = 1;
+    if (m.ice) { g.fillStyle = 'rgba(214,232,246,0.9)'; g.beginPath(); g.arc(cx, cy, rr * r0, 0, Math.PI * 2); g.fill(); r0 -= m.ice; }
+    if (m.ocean) { g.fillStyle = 'rgba(40,96,160,0.95)'; g.beginPath(); g.arc(cx, cy, rr * r0, 0, Math.PI * 2); g.fill(); r0 -= m.ocean; }
+    // Crust: jagged edge, rougher with more terrain variation.
+    g.fillStyle = '#2d211b';
+    g.beginPath();
+    for (let i = 0; i <= 96; i++) {
+      const a = (i / 96) * Math.PI * 2;
+      const j = Math.sin(a * 7 + planet.hash % 13) * 0.5 + Math.sin(a * 17 + (planet.hash >>> 4) % 11) * 0.5;
+      const rad = rr * (r0 - m.jag * (0.5 + 0.5 * j));
+      if (i) g.lineTo(cx + Math.cos(a) * rad, cy + Math.sin(a) * rad); else g.moveTo(cx + Math.cos(a) * rad, cy + Math.sin(a) * rad);
+    }
+    g.closePath(); g.fill();
+    // Mantle: deep red when cool, orange-gold when hot; exotic worlds shift hue.
+    const mantleR = rr * (r0 - m.crust);
+    const mg = g.createRadialGradient(cx, cy, rr * m.outer, cx, cy, mantleR);
+    mg.addColorStop(0, tint([255, Math.round(110 + m.heat * 60), 40], m.hueShift));
+    mg.addColorStop(0.6, tint([Math.round(190 + m.heat * 40), Math.round(50 + m.heat * 40), 22], m.hueShift));
+    mg.addColorStop(1, tint([Math.round(100 + m.heat * 30), 22, 14], m.hueShift));
+    g.fillStyle = mg; g.beginPath(); g.arc(cx, cy, mantleR, 0, Math.PI * 2); g.fill();
+    // Convection currents speed up with heat.
+    g.save(); g.lineCap = 'round';
     doom.swirls.forEach((w) => {
-      const a = w.a + te * 0.18 * (w.light ? 1 : -1);
-      g.strokeStyle = w.light ? 'rgba(255,190,110,0.35)' : 'rgba(110,20,10,0.35)';
+      const rad = rr * (m.outer + (r0 - m.crust - m.outer) * ((w.r - 0.6) / 0.3));
+      const a = w.a + te * (0.1 + m.heat * 0.25) * (w.light ? 1 : -1);
+      g.strokeStyle = w.light ? 'rgba(255,200,120,0.33)' : 'rgba(90,15,8,0.35)';
       g.lineWidth = Math.max(1, rr * w.w);
-      g.beginPath(); g.arc(cx, cy, rr * w.r, a, a + w.len); g.stroke();
+      g.beginPath(); g.arc(cx, cy, Math.max(2, rad), a, a + w.len); g.stroke();
     });
     g.restore();
     // Outer core
-    const og = g.createRadialGradient(cx, cy, rr * 0.2, cx, cy, rr * 0.55);
-    og.addColorStop(0, '#ffe08a'); og.addColorStop(1, '#ff9420');
-    g.fillStyle = og; g.beginPath(); g.arc(cx, cy, rr * 0.55, 0, Math.PI * 2); g.fill();
-    // Inner core
-    const ig = g.createRadialGradient(cx, cy, 0, cx, cy, rr * 0.48 * pulse);
-    ig.addColorStop(0, 'rgba(255,255,255,1)'); ig.addColorStop(0.45, 'rgba(255,246,210,0.95)');
-    ig.addColorStop(0.62, 'rgba(255,214,130,0.6)'); ig.addColorStop(1, 'rgba(255,170,60,0)');
-    g.fillStyle = ig; g.beginPath(); g.arc(cx, cy, rr * 0.48 * pulse, 0, Math.PI * 2); g.fill();
+    const og = g.createRadialGradient(cx, cy, rr * m.inner * 0.8, cx, cy, rr * m.outer);
+    og.addColorStop(0, tint([255, 228, Math.round(120 + m.heat * 60)], m.hueShift));
+    og.addColorStop(1, tint([255, Math.round(130 + m.heat * 40), 30], m.hueShift));
+    g.fillStyle = og; g.beginPath(); g.arc(cx, cy, rr * m.outer, 0, Math.PI * 2); g.fill();
+    // Inner core: whiter and brighter the hotter it is.
+    const ir = rr * m.inner * 1.55 * pulse;
+    const ig = g.createRadialGradient(cx, cy, 0, cx, cy, ir);
+    ig.addColorStop(0, 'rgba(255,255,255,1)');
+    ig.addColorStop(0.4, mixRgb([255, 214, 150], [255, 250, 232], m.heat));
+    ig.addColorStop(0.65, 'rgba(255,200,110,' + (0.45 + m.heat * 0.3) + ')');
+    ig.addColorStop(1, 'rgba(255,160,60,0)');
+    g.fillStyle = ig; g.beginPath(); g.arc(cx, cy, ir, 0, Math.PI * 2); g.fill();
 
-    // Labels with leader lines on the right, inside the stage.
     const la = clamp((te - 1.2) / 0.6, 0, 1);
-    if (la <= 0 || !showLabels) return;
-    const side = 1;
-    const rows = coreLabels();
+    if (la <= 0) return;
     g.save();
     g.globalAlpha = la;
-    const lx = cx + side * (rr * 1.15);
-    rows.forEach((row, i) => {
-      const ang = (-0.62 + i * 0.36) * (side > 0 ? 1 : -1) + (side > 0 ? 0 : Math.PI);
-      const ex = cx + Math.cos(ang) * rr * row[2], ey = cy + Math.sin(ang) * rr * row[2];
-      const ly = cy + (-0.6 + i * 0.4) * rr;
-      g.strokeStyle = 'rgba(236,233,224,0.5)'; g.lineWidth = 1;
-      g.beginPath(); g.moveTo(ex, ey); g.lineTo(lx - side * 12, ly); g.lineTo(lx, ly); g.stroke();
-      g.fillStyle = '#ecebe4'; g.beginPath(); g.arc(ex, ey, 2.5, 0, Math.PI * 2); g.fill();
-      g.textAlign = side > 0 ? 'left' : 'right';
-      g.font = '600 14px ' + font; g.fillText(row[0], lx + side * 8, ly - 2);
-      g.fillStyle = '#a3a197'; g.font = '400 12px ' + font; g.fillText(row[1], lx + side * 8, ly + 14);
-    });
+    if (side) {
+      // Leader lines to a label column on the right.
+      const lx = cx + rr * 1.15, n = layers.length, spacing = Math.min(46, (rr * 1.9) / n);
+      layers.forEach((L, i) => {
+        const mid = (L.r0 + L.r1) / 2;
+        const ang = -0.95 + (i / Math.max(1, n - 1)) * 1.6;
+        const ex = cx + Math.cos(ang) * rr * Math.max(0.05, mid), ey = cy + Math.sin(ang) * rr * Math.max(0.05, mid);
+        const ly = cy - ((n - 1) / 2) * spacing + i * spacing;
+        g.strokeStyle = 'rgba(236,233,224,0.5)'; g.lineWidth = 1;
+        g.beginPath(); g.moveTo(ex, ey); g.lineTo(lx - 12, ly); g.lineTo(lx, ly); g.stroke();
+        g.fillStyle = '#ecebe4'; g.beginPath(); g.arc(ex, ey, 2.5, 0, Math.PI * 2); g.fill();
+        g.textAlign = 'left';
+        g.font = '600 14px ' + font; g.fillText(L.name, lx + 8, ly - 2);
+        g.fillStyle = '#a3a197'; g.font = '400 12px ' + font; g.fillText(L.detail, lx + 8, ly + 14);
+      });
+    } else {
+      // Small screens: names written inside their own band, along the top.
+      g.textAlign = 'center';
+      g.font = '600 ' + Math.max(10, Math.round(rr / 14)) + 'px ' + font;
+      layers.forEach((L) => {
+        const band = (L.r0 - L.r1) * rr;
+        if (band < 11 && L.r1 > 0) return;
+        const yy = L.r1 > 0 ? cy - rr * (L.r0 + L.r1) / 2 + 4 : cy + 4;
+        g.fillStyle = 'rgba(0,0,0,0.55)'; g.fillText(L.name, cx + 1, yy + 1);
+        g.fillStyle = L.r1 === 0 ? '#5a2a08' : '#fff6e6'; g.fillText(L.name, cx, yy);
+      });
+    }
     g.restore();
+  }
+
+  /** Which core layer is under the pointer (null if none). */
+  function coreLayerAt(clientX, clientY) {
+    if (!doom || !doom.coreShown || !doom.coreGeom || !doom.model) return null;
+    const rect = dom.canvas.getBoundingClientRect();
+    const { cx, cy, rr } = doom.coreGeom;
+    const d = Math.hypot(clientX - rect.left - cx, clientY - rect.top - cy) / rr;
+    if (d > 1) return null;
+    const layers = coreLayers(doom.model);
+    for (let i = layers.length - 1; i >= 0; i--) if (d <= layers[i].r0) return layers[i];
+    return null;
   }
 
   function drawAftermath(cx, cy, R, now) {
@@ -1537,9 +1639,28 @@
   }
 
   function showTipAt(clientX, clientY) {
-    if (doom) { hideTip(); return; }
+    if (doom) {
+      const L = coreLayerAt(clientX, clientY);
+      if (!L) { hideTip(); return; }
+      dom.tipSwatch.style.backgroundColor = L.name === 'Inner core' ? '#fff3d0' : L.name === 'Outer core' ? '#ffb347' : L.name === 'Mantle' ? '#d9481c' : L.name === 'Ocean' ? '#28609f' : L.name === 'Ice shell' ? '#d6e8f6' : '#2d211b';
+      dom.tipBiome.textContent = L.name;
+      $('tip-l1').textContent = 'Depth'; $('tip-l3').textContent = 'Material';
+      dom.tipElev.textContent = L.depth;
+      dom.tipTemp.textContent = L.temp;
+      dom.tipSun.textContent = L.comp;
+      dom.tipCoord.textContent = planet.name + ' · ' + doom.model.radiusKm.toLocaleString('en-US') + ' km radius';
+      const tip = dom.tip;
+      tip.classList.add('show');
+      const tw = tip.offsetWidth, th = tip.offsetHeight;
+      let left = clientX + 18, top = clientY + 18;
+      if (left + tw > window.innerWidth - 8) left = clientX - tw - 18;
+      if (top + th > window.innerHeight - 8) top = clientY - th - 18;
+      tip.style.transform = 'translate(' + Math.max(8, left) + 'px,' + Math.max(8, top) + 'px)';
+      return;
+    }
     const info = pick(clientX, clientY);
     if (!info) { hideTip(); return; }
+    $('tip-l1').textContent = 'Elevation'; $('tip-l3').textContent = 'Local time';
     const b = info.biome;
     dom.tipSwatch.style.backgroundColor = biomeCss(b.id);
     dom.tipBiome.textContent = info.river ? (info.river === 2 ? 'Lake' : 'River') + ' · ' + b.name : b.name;
@@ -1579,7 +1700,7 @@
 
   dom.canvas.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (doom) return; // the strike plays out in screen space
+    if (doom) { if (doom.coreShown && e.pointerType !== 'mouse') showTipAt(e.clientX, e.clientY); return; } // the strike plays out in screen space
     try { dom.canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     resetAnim = null;
@@ -2091,7 +2212,13 @@
 
     const animating = moving || drag || pinch || fade || introStart >= 0 || tween || lapse || resetAnim || builder || doom;
     if (animating || dirty) {
-      draw(now);
+      try { draw(now); }
+      catch (err) {
+        // Never let a drawing error stop the app: drop the effect and keep going.
+        if (doom) rebuildPlanet(true);
+        fade = null;
+        if (!frame.reported) { frame.reported = true; setTimeout(() => { throw err; }); }
+      }
       dirty = false;
       updateSky();
       if (hover && !drag) showTipAt(hover.x, hover.y);
