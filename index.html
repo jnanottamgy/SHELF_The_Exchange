@@ -135,6 +135,11 @@
         <span id="forming-text">Forming planet…</span>
       </div>
 
+      <button type="button" class="rebuild-btn" id="btn-rebuild">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 0113.7-5.6L20 8.7"/><path d="M20 4v4.7h-4.7"/><path d="M20 12a8 8 0 01-13.7 5.6L4 15.3"/><path d="M4 20v-4.7h4.7"/></svg>
+        Rebuild planet
+      </button>
+
       <div class="hint" id="hint">Drag to spin · Scroll to zoom · Hover to inspect</div>
 
       <div class="tooltip" id="tip" role="status" aria-live="off">
@@ -210,6 +215,9 @@
         <button type="button" class="toggle" id="tg-photo" aria-pressed="false" title="Photo mode: hide everything but the planet (H)">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Photo mode
         </button>
+        <button type="button" class="toggle danger" id="tg-meteor" aria-pressed="false" title="Meteor strike: shatter the planet and expose its core (K)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="15.5" cy="8.5" r="3.5"/><path d="M12.8 11.2L4 20M10.5 8.6L5 14M15.4 13.5L10 19"/></svg><span id="tg-meteor-label">Meteor strike</span>
+        </button>
         <button type="button" class="toggle" id="tg-lapse" aria-pressed="false" title="Climate time-lapse: sweep the temperature from ice age to hothouse and back (T)">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13.5V5a2 2 0 014 0v8.5a4 4 0 11-4 0z"/><path d="M12 9v6"/></svg>Time-lapse
         </button>
@@ -244,6 +252,7 @@
         <div><kbd>T</kbd> Climate time-lapse</div>
         <div><kbd>A</kbd> Sound on or off</div>
         <div><kbd>H</kbd> Photo mode</div>
+        <div><kbd>K</kbd> Meteor strike</div>
         <div><kbd>1</kbd>–<kbd>6</kbd> Presets</div>
         <div><kbd>S</kbd> Share, <kbd>P</kbd> postcard</div>
       </div>

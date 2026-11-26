@@ -777,3 +777,18 @@ kbd { border-radius: 5px; }
   .toggle { height: 28px; }
   .note p { font-size: 13px; }
 }
+
+/* Meteor strike */
+.toggle.danger.on { color: #ffd7b8; border-color: rgba(230, 110, 60, .65); background: rgba(230, 110, 60, .12); }
+.rebuild-btn {
+  position: absolute; left: 50%; bottom: 72px; transform: translateX(-50%);
+  display: none; align-items: center; gap: 8px; height: 40px; padding: 0 18px;
+  border-radius: 10px; border: 1px solid rgba(217, 178, 111, .55);
+  background: var(--panel-strong); color: var(--text); font-weight: 600; font-size: 13.5px;
+  z-index: 3; pointer-events: auto; animation: hint-in .5s var(--ease) backwards;
+}
+.rebuild-btn:hover { background: rgba(217, 178, 111, .14); }
+.rebuild-btn svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+body.doomed .rebuild-btn { display: inline-flex; }
+body.doomed .hint { opacity: 0; }
+body.photo .rebuild-btn { opacity: 0; pointer-events: none; }

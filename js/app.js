@@ -496,6 +496,10 @@
       pulse = 0.94 + 0.06 * easeOut(t);
     }
 
+    if (doom && doom.shake > 0.3) {
+      ctx.translate((Math.random() * 2 - 1) * doom.shake, (Math.random() * 2 - 1) * doom.shake);
+      doom.shake *= 0.86;
+    }
     if (state.view === 'globe') drawGlobe(introK, pulse);
     else drawMap(introK);
 
@@ -520,6 +524,8 @@
   function drawGlobe(introK, pulse) {
     const R = globeRadius() * (0.6 + 0.4 * introK) * pulse;
     const { cx, cy } = layout;
+    const nowMs = performance.now();
+    if (doom && doom.exploded) { drawAftermath(cx, cy, R, nowMs); return; }
     const N = clamp(Math.round((2 * R * dpr) / 16) * 16, 64, Math.round(qualityCap / 16) * 16);
     const buf = globeBuffer(N);
     const P = frameParams();
@@ -535,8 +541,353 @@
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(buf.canvas, 0, 0, N, N, cx - R, cy - R, R * 2, R * 2);
+    if (doom) drawScars(ctx, cx, cy, R, nowMs - doom.start);
     drawRings(ctx, cx, cy, R, true, 1);
     ctx.globalAlpha = 1;
+    if (doom) {
+      drawMeteors(ctx, cx, cy, R, nowMs - doom.start);
+      if (nowMs - doom.start >= T_EXPLODE) explode(R, buf, N, nowMs - doom.start);
+    }
+  }
+
+
+  // ---------------------------------------------------------------------------
+  // Meteor strike: meteors hit, the crust cracks, the planet shatters and its
+  // molten core is exposed. Purely visual; "Rebuild" re-forms the same planet.
+  // Coordinates below are in planet radii, x right and y down from the centre.
+  // ---------------------------------------------------------------------------
+  const T_EXPLODE = 2900;
+  let doom = null, shardCanvas = null;
+  const rnd = (a, b) => a + Math.random() * (b - a);
+
+  function makeCracks(ix, iy) {
+    const out = [];
+    const n = 3 + Math.floor(Math.random() * 3);
+    for (let k = 0; k < n; k++) {
+      let a = rnd(0, Math.PI * 2), x = ix, y = iy;
+      const pts = [[x, y]];
+      const segs = 6 + Math.floor(Math.random() * 7);
+      for (let q = 0; q < segs; q++) {
+        a += rnd(-0.55, 0.55);
+        const len = rnd(0.05, 0.11), nx = x + Math.cos(a) * len, ny = y + Math.sin(a) * len;
+        if (nx * nx + ny * ny > 0.95) break;
+        x = nx; y = ny; pts.push([x, y]);
+      }
+      if (pts.length > 1) out.push(pts);
+    }
+    return out;
+  }
+
+  function startDoom() {
+    if (!planet || !climate || builder) return;
+    if (doom) { rebuildPlanet(); return; }
+    if (state.view !== 'globe') setView('globe');
+    setLapse(false);
+    hideTip();
+    const impacts = [];
+    for (let i = 0; i < 5; i++) {
+      const a = rnd(0, Math.PI * 2), r = Math.sqrt(rnd(0.01, 0.5));
+      const x = Math.cos(a) * r, y = Math.sin(a) * r, from = rnd(-2.7, -0.45);
+      impacts.push({ x, y, sx: x + Math.cos(from) * 2.6, sy: y + Math.sin(from) * 2.6, at: 700 + i * 280, size: rnd(0.8, 1.3), hit: false, cracks: makeCracks(x, y) });
+    }
+    const swirls = [];
+    for (let i = 0; i < 26; i++) swirls.push({ r: rnd(0.6, 0.9), a: rnd(0, Math.PI * 2), len: rnd(0.3, 1.1), w: rnd(0.006, 0.02), light: Math.random() < 0.5 });
+    doom = { start: performance.now(), impacts, swirls, exploded: false, explodeAt: 0, cracked: false, coreShown: false,
+      shards: null, debris: null, shake: 0, coreTemp: 4600 + (planet.hash % 1600) };
+    view.vyaw = 0; view.vpitch = 0;
+    setDoomUi(true);
+    // On phones the button sits below the planet: bring the planet into view.
+    if (window.innerWidth <= 980) {
+      try { dom.stage.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'start' }); } catch (e) { dom.stage.scrollIntoView(); }
+    }
+    sfx('meteor');
+    markInteracted();
+  }
+
+  function rebuildPlanet(silent) {
+    if (!doom) return;
+    doom = null; shardCanvas = null;
+    document.body.classList.remove('doomed');
+    setDoomUi(false);
+    if (!silent) { introStart = reduceMotion ? -1 : performance.now(); sfx('rebuild'); }
+    dirty = true;
+  }
+
+  function setDoomUi(on) {
+    const el = $('tg-meteor');
+    el.classList.toggle('on', on);
+    el.setAttribute('aria-pressed', on ? 'true' : 'false');
+    $('tg-meteor-label').textContent = on ? 'Rebuild planet' : 'Meteor strike';
+  }
+
+  function stepDoom(now) {
+    if (!doom) return;
+    const t = now - doom.start;
+    doom.impacts.forEach((m) => {
+      if (!m.hit && t >= m.at) { m.hit = true; doom.shake = Math.max(doom.shake, 7 * m.size); sfx('impact'); }
+    });
+    if (!doom.cracked && t >= doom.impacts[doom.impacts.length - 1].at + 200) { doom.cracked = true; sfx('crack'); }
+    if (doom.exploded && !doom.coreShown && now - doom.explodeAt > 1100) {
+      doom.coreShown = true;
+      document.body.classList.add('doomed');
+      sfx('core');
+      toast('Planet destroyed. Its molten core is exposed. Rebuild it any time (K).', 4200);
+    }
+  }
+
+  /** Craters, shockwaves, flashes and glowing cracks, clipped to the disc. */
+  function drawScars(g, cx, cy, R, t) {
+    g.save();
+    g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.clip();
+    // The crust heats up as the cracks spread.
+    const heat = clamp((t - 1500) / (T_EXPLODE - 1500), 0, 1);
+    if (heat > 0) {
+      const hg = g.createRadialGradient(cx, cy, R * 0.2, cx, cy, R);
+      hg.addColorStop(0, 'rgba(255,120,40,' + (0.32 * heat) + ')');
+      hg.addColorStop(1, 'rgba(160,30,10,' + (0.45 * heat) + ')');
+      g.fillStyle = hg; g.fillRect(cx - R, cy - R, R * 2, R * 2);
+    }
+    const lw = Math.max(1, R / 240);
+    doom.impacts.forEach((m) => {
+      const dt = t - m.at;
+      if (dt < 0) return;
+      const px = cx + m.x * R, py = cy + m.y * R;
+      // Cracks grow outward from the crater.
+      const grow = clamp((dt - 80) / 1500, 0, 1);
+      if (grow > 0) {
+        m.cracks.forEach((pts) => {
+          const upto = grow * (pts.length - 1);
+          g.beginPath();
+          g.moveTo(cx + pts[0][0] * R, cy + pts[0][1] * R);
+          for (let i = 1; i <= Math.ceil(upto); i++) {
+            const f = Math.min(1, upto - (i - 1));
+            const x = pts[i - 1][0] + (pts[i][0] - pts[i - 1][0]) * f, y = pts[i - 1][1] + (pts[i][1] - pts[i - 1][1]) * f;
+            g.lineTo(cx + x * R, cy + y * R);
+          }
+          g.lineCap = 'round'; g.lineJoin = 'round';
+          g.strokeStyle = 'rgba(255,90,25,0.55)'; g.lineWidth = lw * 5; g.stroke();
+          g.strokeStyle = 'rgba(255,214,140,0.95)'; g.lineWidth = lw * 1.7; g.stroke();
+        });
+      }
+      // Crater
+      const rc = R * 0.075 * m.size;
+      const cg = g.createRadialGradient(px, py, 0, px, py, rc * 1.6);
+      cg.addColorStop(0, 'rgba(255,245,200,0.95)');
+      cg.addColorStop(0.22, 'rgba(255,150,50,0.9)');
+      cg.addColorStop(0.55, 'rgba(120,30,12,0.75)');
+      cg.addColorStop(1, 'rgba(20,8,5,0)');
+      g.fillStyle = cg; g.beginPath(); g.arc(px, py, rc * 1.6, 0, Math.PI * 2); g.fill();
+      // Shockwave
+      if (dt < 800) {
+        const k = dt / 800;
+        g.strokeStyle = 'rgba(255,225,180,' + ((1 - k) * 0.8) + ')';
+        g.lineWidth = lw * 3 * (1 - k) + 0.5;
+        g.beginPath(); g.arc(px, py, R * (0.05 + k * 0.5) * m.size, 0, Math.PI * 2); g.stroke();
+      }
+      // Flash
+      if (dt < 320) {
+        const k = dt / 320, fr = R * 0.4 * m.size;
+        const fg = g.createRadialGradient(px, py, 0, px, py, fr);
+        fg.addColorStop(0, 'rgba(255,255,240,' + (1 - k) + ')');
+        fg.addColorStop(1, 'rgba(255,200,120,0)');
+        g.fillStyle = fg; g.beginPath(); g.arc(px, py, fr, 0, Math.PI * 2); g.fill();
+      }
+    });
+    g.restore();
+  }
+
+  function drawMeteors(g, cx, cy, R, t) {
+    doom.impacts.forEach((m) => {
+      const k0 = (t - (m.at - 750)) / 750;
+      if (k0 < 0 || k0 >= 1) return;
+      const k = k0 * k0;
+      const x = cx + (m.sx + (m.x - m.sx) * k) * R, y = cy + (m.sy + (m.y - m.sy) * k) * R;
+      const dx = m.x - m.sx, dy = m.y - m.sy, dl = Math.hypot(dx, dy) || 1;
+      const tail = R * (0.35 + 0.35 * k), hr = R * 0.03 * m.size;
+      const tx = x - (dx / dl) * tail, ty = y - (dy / dl) * tail;
+      const tg = g.createLinearGradient(x, y, tx, ty);
+      tg.addColorStop(0, 'rgba(255,240,205,0.95)');
+      tg.addColorStop(0.35, 'rgba(255,140,60,0.55)');
+      tg.addColorStop(1, 'rgba(200,60,30,0)');
+      g.strokeStyle = tg; g.lineWidth = hr * 1.7; g.lineCap = 'round';
+      g.beginPath(); g.moveTo(x, y); g.lineTo(tx, ty); g.stroke();
+      const hg = g.createRadialGradient(x, y, 0, x, y, hr * 3);
+      hg.addColorStop(0, 'rgba(255,255,240,1)');
+      hg.addColorStop(0.3, 'rgba(255,200,120,0.8)');
+      hg.addColorStop(1, 'rgba(255,120,40,0)');
+      g.fillStyle = hg; g.beginPath(); g.arc(x, y, hr * 3, 0, Math.PI * 2); g.fill();
+    });
+  }
+
+  function explode(R, buf, N, t) {
+    const S = Math.max(64, Math.round(2 * R * dpr));
+    shardCanvas = document.createElement('canvas');
+    shardCanvas.width = shardCanvas.height = S;
+    const g = shardCanvas.getContext('2d');
+    g.drawImage(buf.canvas, 0, 0, N, N, 0, 0, S, S);
+    g.setTransform(S / (2 * R), 0, 0, S / (2 * R), 0, 0);
+    drawScars(g, R, R, R, t);
+    // Shards: wedges sharing jagged edges, so the planet splits cleanly.
+    const K = 12, angles = [];
+    for (let k = 0; k < K; k++) angles.push((k + rnd(-0.3, 0.3)) / K * Math.PI * 2);
+    const edges = angles.map((a) => [0.32, 0.62, 0.86].map((r) => {
+      const j = rnd(-0.07, 0.07);
+      return [Math.cos(a + j) * r, Math.sin(a + j) * r];
+    }));
+    const shards = [];
+    for (let k = 0; k < K; k++) {
+      const a0 = angles[k], a1 = k + 1 < K ? angles[k + 1] : angles[0] + Math.PI * 2;
+      const poly = [[0, 0]].concat(edges[k]);
+      for (let i = 0; i <= 6; i++) { const a = a0 + (a1 - a0) * i / 6; poly.push([Math.cos(a) * 1.01, Math.sin(a) * 1.01]); }
+      poly.push(...edges[(k + 1) % K].slice().reverse());
+      const mid = (a0 + a1) / 2;
+      let gx = 0, gy = 0; poly.forEach((p) => { gx += p[0]; gy += p[1]; }); gx /= poly.length; gy /= poly.length;
+      shards.push({ poly, gx, gy, dx: Math.cos(mid), dy: Math.sin(mid), speed: rnd(0.9, 1.7), spin: rnd(-1.3, 1.3) });
+    }
+    const debris = [];
+    for (let i = 0; i < 110; i++) {
+      const a = rnd(0, Math.PI * 2), ember = Math.random() < 0.45;
+      debris.push({ x: Math.cos(a) * rnd(0.1, 0.9), y: Math.sin(a) * rnd(0.1, 0.9), vx: Math.cos(a) * rnd(0.3, 2.1), vy: Math.sin(a) * rnd(0.3, 2.1),
+        size: rnd(0.005, 0.02), ember, life: rnd(1.2, 2.6),
+        color: ember ? (Math.random() < 0.5 ? '255,170,70' : '255,100,40') : (Math.random() < 0.5 ? '120,104,90' : '84,72,64') });
+    }
+    doom.shards = shards; doom.debris = debris;
+    doom.exploded = true; doom.explodeAt = performance.now();
+    doom.shake = 20;
+    sfx('explode');
+  }
+
+  function coreLabels() {
+    return [
+      ['Crust', 'shattered', 0.95],
+      ['Mantle', 'molten rock · ~3,000 °C', 0.74],
+      ['Outer core', 'liquid iron and nickel', 0.42],
+      ['Inner core', 'solid iron · ' + doom.coreTemp.toLocaleString('en-US') + ' °C', 0.1],
+    ];
+  }
+
+  function drawCore(g, cx, cy, R, te, now) {
+    const font = getComputedStyle(document.body).fontFamily;
+    // Make room for the labels inside the stage (never under the panels).
+    if (!doom.labelW) {
+      g.save(); let w = 0;
+      coreLabels().forEach((row) => {
+        g.font = '600 14px ' + font; w = Math.max(w, g.measureText(row[0]).width);
+        g.font = '400 12px ' + font; w = Math.max(w, g.measureText(row[1]).width);
+      });
+      g.restore();
+      doom.labelW = w + 30;
+    }
+    const half = layout.stageW / 2 - 8;
+    const fit = (half - doom.labelW) / 1.15;
+    const target = fit >= R * 0.62 ? Math.min(R, fit) : R;
+    const showLabels = fit >= R * 0.62;
+    const grow = easeOut(clamp(te / 1.4, 0, 1));
+    const s = 0.8 + 0.2 * grow;
+    const pulse = 1 + 0.035 * Math.sin(now * 0.004);
+    const rr = (R + (target - R) * grow) * s;
+    const halo = g.createRadialGradient(cx, cy, rr * 0.8, cx, cy, rr * 1.7);
+    halo.addColorStop(0, 'rgba(255,120,40,0.38)');
+    halo.addColorStop(1, 'rgba(255,90,30,0)');
+    g.fillStyle = halo; g.beginPath(); g.arc(cx, cy, rr * 1.7, 0, Math.PI * 2); g.fill();
+    // Crust rim
+    g.fillStyle = '#2d211b'; g.beginPath(); g.arc(cx, cy, rr * 0.97, 0, Math.PI * 2); g.fill();
+    // Mantle
+    const mg = g.createRadialGradient(cx, cy, rr * 0.5, cx, cy, rr * 0.93);
+    mg.addColorStop(0, '#ff8a33'); mg.addColorStop(0.6, '#d9481c'); mg.addColorStop(1, '#7a1a10');
+    g.fillStyle = mg; g.beginPath(); g.arc(cx, cy, rr * 0.93, 0, Math.PI * 2); g.fill();
+    // Convection currents
+    g.save();
+    g.lineCap = 'round';
+    doom.swirls.forEach((w) => {
+      const a = w.a + te * 0.18 * (w.light ? 1 : -1);
+      g.strokeStyle = w.light ? 'rgba(255,190,110,0.35)' : 'rgba(110,20,10,0.35)';
+      g.lineWidth = Math.max(1, rr * w.w);
+      g.beginPath(); g.arc(cx, cy, rr * w.r, a, a + w.len); g.stroke();
+    });
+    g.restore();
+    // Outer core
+    const og = g.createRadialGradient(cx, cy, rr * 0.2, cx, cy, rr * 0.55);
+    og.addColorStop(0, '#ffe08a'); og.addColorStop(1, '#ff9420');
+    g.fillStyle = og; g.beginPath(); g.arc(cx, cy, rr * 0.55, 0, Math.PI * 2); g.fill();
+    // Inner core
+    const ig = g.createRadialGradient(cx, cy, 0, cx, cy, rr * 0.48 * pulse);
+    ig.addColorStop(0, 'rgba(255,255,255,1)'); ig.addColorStop(0.45, 'rgba(255,246,210,0.95)');
+    ig.addColorStop(0.62, 'rgba(255,214,130,0.6)'); ig.addColorStop(1, 'rgba(255,170,60,0)');
+    g.fillStyle = ig; g.beginPath(); g.arc(cx, cy, rr * 0.48 * pulse, 0, Math.PI * 2); g.fill();
+
+    // Labels with leader lines on the right, inside the stage.
+    const la = clamp((te - 1.2) / 0.6, 0, 1);
+    if (la <= 0 || !showLabels) return;
+    const side = 1;
+    const rows = coreLabels();
+    g.save();
+    g.globalAlpha = la;
+    const lx = cx + side * (rr * 1.15);
+    rows.forEach((row, i) => {
+      const ang = (-0.62 + i * 0.36) * (side > 0 ? 1 : -1) + (side > 0 ? 0 : Math.PI);
+      const ex = cx + Math.cos(ang) * rr * row[2], ey = cy + Math.sin(ang) * rr * row[2];
+      const ly = cy + (-0.6 + i * 0.4) * rr;
+      g.strokeStyle = 'rgba(236,233,224,0.5)'; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(ex, ey); g.lineTo(lx - side * 12, ly); g.lineTo(lx, ly); g.stroke();
+      g.fillStyle = '#ecebe4'; g.beginPath(); g.arc(ex, ey, 2.5, 0, Math.PI * 2); g.fill();
+      g.textAlign = side > 0 ? 'left' : 'right';
+      g.font = '600 14px ' + font; g.fillText(row[0], lx + side * 8, ly - 2);
+      g.fillStyle = '#a3a197'; g.font = '400 12px ' + font; g.fillText(row[1], lx + side * 8, ly + 14);
+    });
+    g.restore();
+  }
+
+  function drawAftermath(cx, cy, R, now) {
+    const te = (now - doom.explodeAt) / 1000;
+    if (te < 0.9) {
+      ctx.globalAlpha = 1 - te / 0.9;
+      drawRings(ctx, cx, cy, R, false, 1);
+      drawRings(ctx, cx, cy, R, true, 1);
+      ctx.globalAlpha = 1;
+    }
+    drawCore(ctx, cx, cy, R, te, now);
+    // Shards fly apart, tumble and fade.
+    const dist = R * 1.7 * (1 - Math.exp(-te * 1.4));
+    doom.shards.forEach((sh) => {
+      const alpha = clamp(1 - (te - 0.8) / 1.4, 0, 1);
+      if (alpha <= 0) return;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      const ox = cx + sh.dx * dist * sh.speed, oy = cy + sh.dy * dist * sh.speed;
+      ctx.translate(ox + sh.gx * R, oy + sh.gy * R);
+      ctx.rotate(sh.spin * te);
+      ctx.translate(-sh.gx * R, -sh.gy * R);
+      ctx.beginPath();
+      sh.poly.forEach((p, i) => { if (i) ctx.lineTo(p[0] * R, p[1] * R); else ctx.moveTo(p[0] * R, p[1] * R); });
+      ctx.closePath();
+      ctx.save(); ctx.clip();
+      ctx.drawImage(shardCanvas, -R, -R, R * 2, R * 2);
+      ctx.restore();
+      ctx.strokeStyle = 'rgba(255,120,45,0.9)'; ctx.lineWidth = Math.max(1, R / 200); ctx.lineJoin = 'round';
+      ctx.stroke();
+      ctx.restore();
+    });
+    // Debris and embers
+    doom.debris.forEach((d) => {
+      if (te > d.life) return;
+      const a = 1 - te / d.life;
+      const x = cx + (d.x + d.vx * te) * R, y = cy + (d.y + d.vy * te) * R;
+      ctx.fillStyle = 'rgba(' + d.color + ',' + a + ')';
+      ctx.beginPath(); ctx.arc(x, y, Math.max(0.8, d.size * R), 0, Math.PI * 2); ctx.fill();
+    });
+    // Blast flash
+    if (te < 0.7) {
+      const k = te / 0.7;
+      const fg = ctx.createRadialGradient(cx, cy, 0, cx, cy, R * (1 + k * 1.5));
+      fg.addColorStop(0, 'rgba(255,250,230,' + (0.9 * (1 - k)) + ')');
+      fg.addColorStop(0.5, 'rgba(255,170,80,' + (0.5 * (1 - k)) + ')');
+      fg.addColorStop(1, 'rgba(255,100,40,0)');
+      ctx.fillStyle = fg; ctx.beginPath(); ctx.arc(cx, cy, R * (1 + k * 1.5), 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(255,220,170,' + (0.7 * (1 - k)) + ')';
+      ctx.lineWidth = 3 * (1 - k) + 0.5;
+      ctx.beginPath(); ctx.arc(cx, cy, R * (1.05 + k * 1.8), 0, Math.PI * 2); ctx.stroke();
+    }
   }
 
   // One reusable offscreen buffer for the globe; cleared when its size changes.
@@ -654,6 +1005,7 @@
   }
 
   function adoptPlanet(p) {
+    if (doom) rebuildPlanet(true);
     const first = !planet;
     if (!first) snapshotForFade();
     planet = p;
@@ -1080,6 +1432,7 @@
   }
 
   function setView(v) {
+    if (doom && v === 'map') rebuildPlanet(true);
     if ((v === 'map' ? 'map' : 'globe') !== state.view) sfx('view');
     state.view = v === 'map' ? 'map' : 'globe';
     const isMap = state.view === 'map';
@@ -1184,6 +1537,7 @@
   }
 
   function showTipAt(clientX, clientY) {
+    if (doom) { hideTip(); return; }
     const info = pick(clientX, clientY);
     if (!info) { hideTip(); return; }
     const b = info.biome;
@@ -1225,6 +1579,7 @@
 
   dom.canvas.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
+    if (doom) return; // the strike plays out in screen space
     try { dom.canvas.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     resetAnim = null;
@@ -1343,6 +1698,7 @@
     else if (k === 't' || k === 'T') { setLapse(!lapse); }
     else if (k === 'a' || k === 'A') toggleSound();
     else if (k === 'h' || k === 'H') setPhoto(!document.body.classList.contains('photo'));
+    else if (k === 'k' || k === 'K') startDoom();
     else if (k === 's' || k === 'S') share();
     else if (k === 'p' || k === 'P') savePostcard();
     else if ((k === '+' || k === '=') && state.view === 'globe') setZoom(view.targetZoom * 1.2);
@@ -1614,6 +1970,8 @@
   dom.tg.lights.addEventListener('click', () => setToggle('lights', !state.lights));
   dom.tg.grid.addEventListener('click', () => setToggle('grid', !state.grid));
   dom.tg.lapse.addEventListener('click', () => { setLapse(!lapse); markInteracted(); });
+  $('tg-meteor').addEventListener('click', startDoom);
+  $('btn-rebuild').addEventListener('click', () => rebuildPlanet());
   dom.viewGlobe.addEventListener('click', () => setView('globe'));
   dom.viewMap.addEventListener('click', () => setView('map'));
   dom.viewGlobe.parentElement.addEventListener('keydown', (e) => {
@@ -1696,6 +2054,7 @@
     stepBuilder();
     stepTween(now);
     stepLapse(now);
+    stepDoom(now);
     stepReset(now);
     if (climateDirty) recomputeClimate();
     if (statsDirty && now - lastStatsAt > 90) updateCard(false);
@@ -1703,7 +2062,7 @@
     stepScramble(now);
 
     let moving = false;
-    const running = !state.paused && state.speed > 0;
+    const running = !state.paused && state.speed > 0 && !doom;
     if (running) {
       view.spin += dt * state.speed * 0.065;
       view.cloudShift += dt * (0.5 + state.speed * 0.22);
@@ -1730,7 +2089,7 @@
 
     dom.clock.textContent = 'Day ' + (Math.floor(view.spin / (Math.PI * 2)) + 1);
 
-    const animating = moving || drag || pinch || fade || introStart >= 0 || tween || lapse || resetAnim || builder;
+    const animating = moving || drag || pinch || fade || introStart >= 0 || tween || lapse || resetAnim || builder || doom;
     if (animating || dirty) {
       draw(now);
       dirty = false;
