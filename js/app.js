@@ -1455,6 +1455,14 @@
     });
   }
 
+  /** X: put temperature, water, terrain and day speed back to their defaults. */
+  function resetSliders() {
+    const L = Terra.LIMITS;
+    applyPreset({ temp: L.temp.def, water: L.water.def, terrain: L.terrain.def });
+    if (state.speed !== L.speed.def) { state.speed = L.speed.def; syncSliders(); updatePlayButton(); scheduleHash(); }
+    toast('Sliders reset to defaults');
+  }
+
   function applyPreset(p) {
     markInteracted();
     setLapse(false);
@@ -1820,6 +1828,7 @@
     else if (k === 'a' || k === 'A') toggleSound();
     else if (k === 'h' || k === 'H') setPhoto(!document.body.classList.contains('photo'));
     else if (k === 'k' || k === 'K') startDoom();
+    else if (k === 'x' || k === 'X') resetSliders();
     else if (k === 's' || k === 'S') share();
     else if (k === 'p' || k === 'P') savePostcard();
     else if ((k === '+' || k === '=') && state.view === 'globe') setZoom(view.targetZoom * 1.2);
