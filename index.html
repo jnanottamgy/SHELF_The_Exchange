@@ -145,6 +145,11 @@
         <button type="button" class="hud-btn" id="btn-zoom-out" title="Zoom out (−)" aria-label="Zoom out"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"/></svg></button>
         <button type="button" class="hud-btn" id="btn-zoom-in" title="Zoom in (+)" aria-label="Zoom in"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 12h12"/><path d="M12 6v12"/></svg></button>
         <button type="button" class="hud-btn" id="btn-reset" title="Reset view (0)" aria-label="Reset view"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="7"/><circle cx="12" cy="12" r="2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/></svg></button>
+        <span class="hud-sep" aria-hidden="true"></span>
+        <button type="button" class="hud-btn" id="btn-sound" title="Sound on or off (A)" aria-label="Mute sound" aria-pressed="true">
+          <svg class="i-sound" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M15.5 9a4 4 0 010 6"/><path d="M18 6.5a7.5 7.5 0 010 11"/></svg>
+          <svg class="i-mute" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9.5h3.5L12 5.5v13l-4.5-4H4z"/><path d="M16 9.5l5 5M21 9.5l-5 5"/></svg>
+        </button>
       </div>
     </main>
 
@@ -222,6 +227,7 @@
         <div><kbd>C</kbd> Clouds, <kbd>L</kbd> lights</div>
         <div><kbd>G</kbd> Grid</div>
         <div><kbd>T</kbd> Climate time-lapse</div>
+        <div><kbd>A</kbd> Sound on or off</div>
         <div><kbd>1</kbd>–<kbd>6</kbd> Presets</div>
         <div><kbd>S</kbd> Share, <kbd>P</kbd> postcard</div>
       </div>
@@ -233,6 +239,7 @@
   <noscript><div class="noscript">Tiny Terra needs JavaScript to build planets.</div></noscript>
 
   <script src="js/terra.js"></script>
+  <script src="js/audio.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>

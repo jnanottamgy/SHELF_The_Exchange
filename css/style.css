@@ -335,6 +335,10 @@ svg { display: block; }
 #btn-play.paused .i-play { display: block; }
 #btn-play.paused .i-pause { display: none; }
 #btn-play.paused { color: var(--accent); }
+#btn-sound .i-mute { display: none; }
+#btn-sound.muted .i-sound { display: none; }
+#btn-sound.muted .i-mute { display: block; }
+#btn-sound.muted { color: var(--faint); }
 .hud-clock { font-family: var(--mono); font-size: 12px; color: var(--muted); min-width: 58px; text-align: center; }
 .hud-sep { width: 1px; height: 20px; background: var(--stroke-strong); margin: 0 4px; }
 

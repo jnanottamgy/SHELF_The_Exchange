@@ -15,6 +15,7 @@
 - Explore it as a rotating globe or a flat map. Sunlight sweeps across the planet in a day-night cycle, and city lights or lava glow on the night side.
 - Temperature, water level and terrain sliders reshape the planet live. A hot world spreads into deserts and a cold one freezes over. A climate time-lapse shows the ice caps advancing and retreating.
 - Each planet gets an ID card with a generated name, world type, habitability score and an explorer's log. Planets can be saved as postcards.
+- Every planet also has its own sound: an ambient hum whose chord comes from the seed, an ocean swell that follows the water level, and gentle sound effects for every control (mute with the speaker button or `A`).
 
 ![Tiny Terra showing a ringed Earth-like planet](docs/preview.jpg)
 
@@ -57,6 +58,7 @@ Drag to spin, scroll or pinch to zoom, hover or tap to inspect a spot.
 | `M` | Globe or map |
 | `Space` | Pause day and night |
 | `T` | Climate time-lapse |
+| `A` | Sound on or off |
 | `C`, `L`, `G` | Clouds, night lights, grid |
 | `1`–`6` | Climate presets |
 | `S`, `P` | Share link, postcard |
@@ -68,6 +70,7 @@ index.html      App markup
 css/style.css   Styling (no external fonts or assets)
 js/terra.js     Planet engine: deterministic, no DOM
 js/app.js       Rendering, interaction and UI
+js/audio.js     Sound, synthesised live with the Web Audio API (no audio files)
 js/tests.js     Self-check suite (browser and Node)
 tests.html      Self-check page
 docs/           README image

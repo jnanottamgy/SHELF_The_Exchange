@@ -55,6 +55,11 @@
     skyFar: $('sky-far'), skyNear: $('sky-near'), skyTwinkle: $('sky-twinkle'),
   };
   const ctx = dom.canvas.getContext('2d');
+  dom.sound = $('btn-sound');
+
+  // Sound (js/audio.js). Optional: the app works the same without it.
+  const audio = window.TerraAudio || null;
+  const sfx = (name) => { if (audio) audio.sfx(name); };
 
   // ---------------------------------------------------------------------------
   // State
@@ -657,6 +662,8 @@
     if (first) introStart = reduceMotion ? -1 : performance.now();
     updateIdentity();
     updateCard(true);
+    if (audio) audio.planet(planet.hash, state.temp, state.water);
+    if (!first) sfx('planet');
     document.title = planet.name + ' · Tiny Terra';
     dirty = true;
   }
@@ -667,6 +674,7 @@
     climateDirty = false;
     statsDirty = true;
     dirty = true;
+    if (audio) audio.climate(state.temp, state.water);
   }
 
   // ---------------------------------------------------------------------------
@@ -820,6 +828,7 @@
     state[key] = v;
     if (key !== 'speed') { climateDirty = true; scheduleHash(); }
     else updatePlayButton();
+    sfx('tick');
     syncSliders();
     markInteracted();
   }
@@ -847,6 +856,7 @@
   function applyPreset(p) {
     markInteracted();
     setLapse(false);
+    sfx('preset');
     if (reduceMotion) {
       state.temp = p.temp; state.water = p.water; state.terrain = p.terrain;
       climateDirty = true; syncSliders(); scheduleHash();
@@ -869,6 +879,7 @@
     if (on && !lapse) {
       tween = null;
       lapse = { start: performance.now(), from: state.temp };
+      sfx('lapse');
       toast('Climate time-lapse: watch the ice caps grow and melt');
     } else if (!on && lapse) {
       lapse = null;
@@ -917,9 +928,11 @@
     el.classList.toggle('on', state[key]);
     el.setAttribute('aria-pressed', state[key] ? 'true' : 'false');
     dirty = true;
+    sfx(state[key] ? 'toggle' : 'off');
   }
 
   function setView(v) {
+    if ((v === 'map' ? 'map' : 'globe') !== state.view) sfx('view');
     state.view = v === 'map' ? 'map' : 'globe';
     const isMap = state.view === 'map';
     dom.viewGlobe.classList.toggle('on', !isMap);
@@ -953,6 +966,7 @@
     } else state.paused = true;
     updatePlayButton();
     markInteracted();
+    sfx('click');
   }
 
   function setZoom(z) { view.targetZoom = clamp(z, ZOOM_MIN, ZOOM_MAX); }
@@ -1178,6 +1192,7 @@
     else if (k === 'l' || k === 'L') setToggle('lights', !state.lights);
     else if (k === 'g' || k === 'G') setToggle('grid', !state.grid);
     else if (k === 't' || k === 'T') { setLapse(!lapse); }
+    else if (k === 'a' || k === 'A') toggleSound();
     else if (k === 's' || k === 'S') share();
     else if (k === 'p' || k === 'P') savePostcard();
     else if ((k === '+' || k === '=') && state.view === 'globe') setZoom(view.targetZoom * 1.2);
@@ -1225,12 +1240,13 @@
   dom.seedForm.addEventListener('submit', (e) => {
     e.preventDefault();
     clearTimeout(seedTimer);
-    if (!requestSeed(dom.seed.value)) { toast('Type a word or number to create a planet'); return; }
+    if (!requestSeed(dom.seed.value)) { sfx('error'); toast('Type a word or number to create a planet'); return; }
     refreshSeedStatus();
     if (window.matchMedia && window.matchMedia('(pointer: coarse)').matches) dom.seed.blur();
   });
 
   function randomPlanet() {
+    sfx('dice');
     let s = Terra.randomSeed();
     for (let i = 0; i < 5 && s === state.seed; i++) s = Terra.randomSeed();
     clearTimeout(seedTimer);
@@ -1284,7 +1300,7 @@
   function share() {
     writeHash();
     const url = shareUrl();
-    const done = (ok) => toast(ok ? 'Link copied. Anyone who opens it sees this exact planet.' : 'Copy this link: ' + url, ok ? 2600 : 6000);
+    const done = (ok) => sfx(ok ? 'chime' : 'error') || toast(ok ? 'Link copied. Anyone who opens it sees this exact planet.' : 'Copy this link: ' + url, ok ? 2600 : 6000);
     const legacy = () => {
       try {
         const ta = document.createElement('textarea');
@@ -1384,6 +1400,7 @@
         document.body.appendChild(a); a.click(); a.remove();
         if (revoke) setTimeout(() => URL.revokeObjectURL(url), 5000);
         toast('Postcard saved: ' + filename);
+        sfx('shutter');
       };
       if (c.toBlob) c.toBlob((blob) => { if (blob) finish(URL.createObjectURL(blob), true); else finish(c.toDataURL('image/png'), false); }, 'image/png');
       else finish(c.toDataURL('image/png'), false);
@@ -1419,6 +1436,7 @@
 
   let helpReturn = null;
   function openHelp() {
+    sfx('click');
     helpReturn = document.activeElement;
     dom.helpModal.hidden = false;
     dom.helpClose.focus();
@@ -1456,9 +1474,31 @@
     }
   });
   dom.play.addEventListener('click', togglePlay);
-  dom.zoomIn.addEventListener('click', () => { setZoom(view.targetZoom * 1.25); markInteracted(); });
-  dom.zoomOut.addEventListener('click', () => { setZoom(view.targetZoom / 1.25); markInteracted(); });
-  dom.reset.addEventListener('click', () => { resetView(); markInteracted(); });
+  dom.zoomIn.addEventListener('click', () => { setZoom(view.targetZoom * 1.25); markInteracted(); sfx('click'); });
+  dom.zoomOut.addEventListener('click', () => { setZoom(view.targetZoom / 1.25); markInteracted(); sfx('click'); });
+  dom.reset.addEventListener('click', () => { resetView(); markInteracted(); sfx('click'); });
+
+  // Sound: browsers only allow audio after a user gesture, so unlock on the first one.
+  function updateSoundButton() {
+    const on = !!(audio && audio.enabled);
+    dom.sound.classList.toggle('muted', !on);
+    dom.sound.setAttribute('aria-pressed', on ? 'true' : 'false');
+    dom.sound.setAttribute('aria-label', on ? 'Mute sound' : 'Turn sound on');
+  }
+  function toggleSound() {
+    if (!audio || !audio.supported) { toast('Sound is not supported in this browser'); return; }
+    const on = audio.setEnabled(!audio.enabled);
+    updateSoundButton();
+    if (on) setTimeout(() => sfx('toggle'), 60);
+    toast(on ? 'Sound on' : 'Sound off', 1200);
+  }
+  if (audio) {
+    const unlock = () => audio.unlock();
+    window.addEventListener('pointerdown', unlock, true);
+    window.addEventListener('keydown', unlock, true);
+  }
+  dom.sound.addEventListener('click', toggleSound);
+  updateSoundButton();
   dom.random.addEventListener('click', randomPlanet);
   dom.share.addEventListener('click', share);
   dom.save.addEventListener('click', savePostcard);
@@ -1477,7 +1517,10 @@
   window.addEventListener('resize', resize);
   window.addEventListener('scroll', hideTip, { passive: true });
   if (window.ResizeObserver) new ResizeObserver(() => resize()).observe(dom.stage);
-  document.addEventListener('visibilitychange', () => { last = performance.now(); });
+  document.addEventListener('visibilitychange', () => {
+    last = performance.now();
+    if (audio) { if (document.hidden) audio.pause(); else audio.resume(); }
+  });
 
   // ---------------------------------------------------------------------------
   // Main loop
