@@ -305,7 +305,8 @@
   function toHash(state) {
     const s = sanitizeState(state);
     return '#s=' + encodeURIComponent(s.seed) + '&t=' + s.temp + '&w=' + s.water +
-      '&r=' + s.terrain + (s.view === 'map' ? '&v=map' : '');
+      '&r=' + s.terrain + (s.speed !== LIMITS.speed.def ? '&d=' + s.speed : '') +
+      (s.view === 'map' ? '&v=map' : '');
   }
 
   // A pool for the dice button — memorable, shareable seeds.
@@ -524,6 +525,7 @@
       biome: new Uint8Array(N), temp: new Float32Array(N), elev: new Float32Array(N),
       rgb: new Uint8Array(N * 3), water: new Uint8Array(N),
       lights: new Uint8Array(N), lightType: new Uint8Array(N),
+      wet: new Float32Array(N), river: new Uint8Array(N), bank: new Uint8Array(N), path: new Int32Array(4096),
       clouds: new Float32Array(planet.CW * planet.CH), // pre-threshold: density = smoothstep(0, 1, value)
       stats: null, settings: null, seaLevel: 0,
     };
@@ -634,6 +636,7 @@
           T = Tsea;
           const depth = -em;
           water[i] = 1;
+          out.wet[i] = 1;
           if (Tsea < -9) {
             b = BIOME.SEA_ICE; water[i] = 0;
             const c = palette[b];
@@ -660,6 +663,7 @@
           em = wf > 0 ? aboveSea : emRel;
           let me = 0.62 * (moist[i] * 1.25 + 0.5) + 0.38 * moistLat + (wf - 0.55) * 0.35 - Math.max(0, T - 24) * 0.022;
           me = clamp(me, 0, 1);
+          out.wet[i] = me;
           if (T > 52) b = BIOME.SCORCHED;
           else if (emRel > 3200) b = T < -14 ? BIOME.SNOW : BIOME.MOUNTAIN;
           else if (T < -18) b = BIOME.ICE;
@@ -696,6 +700,7 @@
     }
 
     softenLand(out, planet, sl);
+    const riverCount = carveRivers(out, planet, sl);
 
     const frac = Array.from(area, (a) => a / totalWeight);
     const waterFrac = frac[0] + frac[1] + frac[2] + frac[3];
@@ -748,6 +753,7 @@
       civilization: litArea / totalWeight > 0.0004,
       cloudCover: cloudSum / cr.length,
       seaLevel: sl,
+      rivers: riverCount,
     };
     const desc = describe(planet, stats);
     stats.className = desc.className;
@@ -790,6 +796,110 @@
         }
       }
     }
+  }
+
+  /**
+   * Rivers: in each 16x16 block, the highest wet, unfrozen land point becomes
+   * a spring. Water then runs downhill (steepest of 8 neighbours) until it
+   * reaches the sea, joins another river or pools in a basin (a lake). Land
+   * next to a river turns greener. Fully deterministic; returns the count.
+   */
+  const RIVER_CELL = 16;
+  const DRY_BANK = new Uint8Array(16);
+  [BIOME.DESERT, BIOME.SAVANNA, BIOME.GRASSLAND, BIOME.TUNDRA].forEach((b) => { DRY_BANK[b] = 1; });
+  function riverBlocked(b) {
+    return b === BIOME.SNOW || b === BIOME.ICE || b === BIOME.SCORCHED || b === BIOME.SEA_ICE;
+  }
+  function carveRivers(out, planet, sl) {
+    const { W, H, palette, rowCos } = planet;
+    const h = out.height, biome = out.biome, temp = out.temp, elev = out.elev, rgb = out.rgb, wet = out.wet;
+    const shade = out.shade;
+    if (!out.river || out.river.length !== W * H) {
+      out.wet = out.wet && out.wet.length === W * H ? out.wet : new Float32Array(W * H);
+      out.river = new Uint8Array(W * H); out.bank = new Uint8Array(W * H); out.path = new Int32Array(4096);
+    }
+    const river = out.river, bank = out.bank, path = out.path;
+    river.fill(0); bank.fill(0);
+    let count = 0;
+    for (let y0 = 0; y0 + RIVER_CELL <= H; y0 += RIVER_CELL) {
+      if (rowCos[y0 + (RIVER_CELL >> 1)] < 0.34) continue; // skip polar caps
+      for (let x0 = 0; x0 + RIVER_CELL <= W; x0 += RIVER_CELL) {
+        let best = -1, bestH = -Infinity;
+        for (let y = y0; y < y0 + RIVER_CELL; y++) {
+          for (let x = x0; x < x0 + RIVER_CELL; x++) {
+            const i = y * W + x;
+            if (h[i] < sl || h[i] <= bestH) continue;
+            const b = biome[i];
+            if (riverBlocked(b) || b === BIOME.BEACH || wet[i] < 0.5 || elev[i] < 700) continue;
+            if (temp[i] < -3 || temp[i] > 45) continue;
+            best = i; bestH = h[i];
+          }
+        }
+        if (best < 0 || river[best]) continue;
+        let cur = best, n = 0, end = 0; // end: 0 = basin, 1 = sea or another river
+        path[n++] = cur;
+        while (n < path.length) {
+          const y = (cur / W) | 0, x = cur - y * W;
+          let next = -1, nh = h[cur];
+          for (let dy = -1; dy <= 1; dy++) {
+            const yy = y + dy;
+            if (yy < 0 || yy >= H) continue;
+            for (let dx = -1; dx <= 1; dx++) {
+              if (!dx && !dy) continue;
+              let xx = x + dx;
+              if (xx < 0) xx += W; else if (xx >= W) xx -= W;
+              const j = yy * W + xx;
+              if (h[j] < nh) { nh = h[j]; next = j; }
+            }
+          }
+          if (next < 0) break;                       // basin: ends in a lake
+          if (h[next] < sl || river[next]) { end = 1; break; } // sea or confluence
+          if (riverBlocked(biome[next])) break;       // runs under ice or dries out
+          cur = next;
+          path[n++] = cur;
+        }
+        if (n < (end ? 5 : 14)) continue;
+        count++;
+        for (let k = 0; k < n; k++) river[path[k]] = 1;
+        if (!end) river[cur] = 2; // lake at the end of an inland river
+      }
+    }
+    if (!count) return 0;
+    // Banks: mark land within two texels of a river.
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        if (!river[y * W + x]) continue;
+        for (let dy = -2; dy <= 2; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= H) continue;
+          for (let dx = -2; dx <= 2; dx++) {
+            let xx = x + dx;
+            if (xx < 0) xx += W; else if (xx >= W) xx -= W;
+            const j = yy * W + xx;
+            const lvl = Math.abs(dx) <= 1 && Math.abs(dy) <= 1 ? 2 : 1;
+            if (lvl > bank[j]) bank[j] = lvl;
+          }
+        }
+      }
+    }
+    const green = palette[BIOME.GRASSLAND], lush = palette[BIOME.FOREST];
+    const rs = palette[BIOME.SHALLOW], ro = palette[BIOME.OCEAN];
+    const N = W * H;
+    for (let i = 0; i < N; i++) {
+      const o3 = i * 3;
+      if (river[i]) {
+        const sh = shade[i] * 0.92, k = river[i] === 2 ? 0.55 : 0.3;
+        rgb[o3] = clamp(lerp(rs[0], ro[0], k) * sh, 0, 255);
+        rgb[o3 + 1] = clamp(lerp(rs[1], ro[1], k) * sh, 0, 255);
+        rgb[o3 + 2] = clamp(lerp(rs[2], ro[2], k) * sh, 0, 255);
+      } else if (bank[i] && h[i] >= sl && DRY_BANK[biome[i]]) {
+        const t = bank[i] === 2 ? 0.55 : 0.3, c = bank[i] === 2 ? lush : green, sh = shade[i];
+        rgb[o3] = clamp(lerp(rgb[o3], c[0] * sh, t), 0, 255);
+        rgb[o3 + 1] = clamp(lerp(rgb[o3 + 1], c[1] * sh, t), 0, 255);
+        rgb[o3 + 2] = clamp(lerp(rgb[o3 + 2], c[2] * sh, t), 0, 255);
+      }
+    }
+    return count;
   }
 
   function atmosphereColor(st) {
@@ -868,6 +978,7 @@
     const lon = (((x + 0.5) / W) * 360) - 180;
     return {
       biome: BIOMES[b], temp: climate.temp[i], elev: climate.elev[i], lat, lon, index: i,
+      river: climate.river ? climate.river[i] : 0,
     };
   }
 

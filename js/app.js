@@ -45,7 +45,7 @@
     presets: $('presets'),
     sl: { temp: $('sl-temp'), water: $('sl-water'), terrain: $('sl-terrain'), speed: $('sl-speed') },
     out: { temp: $('out-temp'), water: $('out-water'), terrain: $('out-terrain'), speed: $('out-speed') },
-    tg: { clouds: $('tg-clouds'), lights: $('tg-lights'), grid: $('tg-grid') },
+    tg: { clouds: $('tg-clouds'), lights: $('tg-lights'), grid: $('tg-grid'), lapse: $('tg-lapse') },
     pName: $('p-name'), pDesignation: $('p-designation'), pClass: $('p-class'), pNote: $('p-note'),
     habValue: $('hab-value'), habNum: $('hab-num'), habVerdict: $('hab-verdict'), habLife: $('hab-life'),
     lifeText: $('life-text'), habTraits: $('hab-traits'),
@@ -812,6 +812,7 @@
     if (!Number.isFinite(v)) v = lim.def;
     v = clamp(v, lim.min, lim.max);
     tween = null;
+    if (key === 'temp') setLapse(false);
     if (state[key] === v) { syncSliders(); return; }
     state[key] = v;
     if (key !== 'speed') { climateDirty = true; scheduleHash(); }
@@ -842,6 +843,7 @@
 
   function applyPreset(p) {
     markInteracted();
+    setLapse(false);
     if (reduceMotion) {
       state.temp = p.temp; state.water = p.water; state.terrain = p.terrain;
       climateDirty = true; syncSliders(); scheduleHash();
@@ -852,6 +854,36 @@
       to: { temp: p.temp, water: p.water, terrain: p.terrain },
       start: performance.now(), dur: 900,
     };
+  }
+
+  // Climate time-lapse: the temperature sweeps ice age -> hothouse -> ice age
+  // (a triangle wave starting from the current value), so ice caps visibly
+  // advance and retreat. Any manual temperature change stops it.
+  const LAPSE_LO = -25, LAPSE_HI = 40, LAPSE_PERIOD = 16000;
+  let lapse = null;
+  function setLapse(on) {
+    const was = !!lapse;
+    if (on && !lapse) {
+      tween = null;
+      lapse = { start: performance.now(), from: state.temp };
+      toast('Climate time-lapse: watch the ice caps grow and melt');
+    } else if (!on && lapse) {
+      lapse = null;
+      scheduleHash();
+      statsDirty = true;
+    }
+    const el = dom.tg.lapse;
+    if (el) { el.classList.toggle('on', !!lapse); el.setAttribute('aria-pressed', lapse ? 'true' : 'false'); }
+    if (was !== !!lapse) dirty = true;
+  }
+  function stepLapse(now) {
+    if (!lapse) return;
+    const span = LAPSE_HI - LAPSE_LO;
+    const x0 = clamp((lapse.from - LAPSE_LO) / span, 0, 1);
+    const p = ((1 - x0) / 2 + (now - lapse.start) / LAPSE_PERIOD) % 1;
+    const x = p < 0.5 ? 1 - 2 * p : 2 * p - 1;
+    const v = Math.round(LAPSE_LO + span * x);
+    if (v !== state.temp) { state.temp = v; climateDirty = true; syncSliders(); }
   }
 
   function stepTween(now) {
@@ -991,7 +1023,7 @@
     if (!info) { hideTip(); return; }
     const b = info.biome;
     dom.tipSwatch.style.backgroundColor = biomeCss(b.id);
-    dom.tipBiome.textContent = b.name;
+    dom.tipBiome.textContent = info.river ? (info.river === 2 ? 'Lake' : 'River') + ' · ' + b.name : b.name;
     const e = Math.round(info.elev);
     dom.tipElev.textContent = info.biome.water
       ? Math.abs(e).toLocaleString('en-US') + ' m deep'
@@ -1142,6 +1174,7 @@
     else if (k === 'c' || k === 'C') setToggle('clouds', !state.clouds);
     else if (k === 'l' || k === 'L') setToggle('lights', !state.lights);
     else if (k === 'g' || k === 'G') setToggle('grid', !state.grid);
+    else if (k === 't' || k === 'T') { setLapse(!lapse); }
     else if (k === 's' || k === 'S') share();
     else if (k === 'p' || k === 'P') savePostcard();
     else if ((k === '+' || k === '=') && state.view === 'globe') setZoom(view.targetZoom * 1.2);
@@ -1229,6 +1262,7 @@
 
   function applyExternalState(s) {
     tween = null;
+    setLapse(false);
     state.temp = s.temp; state.water = s.water; state.terrain = s.terrain; state.speed = s.speed;
     climateDirty = true;
     syncSliders();
@@ -1408,6 +1442,7 @@
   dom.tg.clouds.addEventListener('click', () => setToggle('clouds', !state.clouds));
   dom.tg.lights.addEventListener('click', () => setToggle('lights', !state.lights));
   dom.tg.grid.addEventListener('click', () => setToggle('grid', !state.grid));
+  dom.tg.lapse.addEventListener('click', () => { setLapse(!lapse); markInteracted(); });
   dom.viewGlobe.addEventListener('click', () => setView('globe'));
   dom.viewMap.addEventListener('click', () => setView('map'));
   dom.viewGlobe.parentElement.addEventListener('keydown', (e) => {
@@ -1452,6 +1487,7 @@
     if (Math.min(window.devicePixelRatio || 1, 2) !== dpr) resize();
     stepBuilder();
     stepTween(now);
+    stepLapse(now);
     stepReset(now);
     if (climateDirty) recomputeClimate();
     if (statsDirty && now - lastStatsAt > 90) updateCard(false);
@@ -1486,7 +1522,7 @@
 
     dom.clock.textContent = 'Day ' + (Math.floor(view.spin / (Math.PI * 2)) + 1);
 
-    const animating = moving || drag || pinch || fade || introStart >= 0 || tween || resetAnim || builder;
+    const animating = moving || drag || pinch || fade || introStart >= 0 || tween || lapse || resetAnim || builder;
     if (animating || dirty) {
       draw(now);
       dirty = false;
@@ -1496,7 +1532,7 @@
 
     // Adaptive quality: keep the shading under ~11 ms on slower machines.
     if (++frameCount % 30 === 0 && state.view === 'globe') {
-      if (shadeEma > 11 && qualityCap > 260) qualityCap *= 0.85;
+      if (shadeEma > 11 && qualityCap > 360) qualityCap = Math.max(360, qualityCap * 0.85);
       else if (shadeEma < 5.5 && qualityCap < 760) qualityCap *= 1.08;
     }
     requestAnimationFrame(frame);
