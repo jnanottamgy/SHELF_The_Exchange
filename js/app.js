@@ -1829,6 +1829,8 @@
     sl: 0, datum: 0, amp: 1, range: 1, hasSea: true, tool: 'raise', painting: false, bases: [],
     ship: { x: LG / 2, y: LG / 2 }, keys: new Set(), t0: 0, last: 0, raf: 0, size: 300, pointer: null,
     noise: null, noiseFor: null, lat: 0, lon: 0,
+    lit: new Float32Array(LG * LG), ltype: new Uint8Array(LG * LG),
+    sun: null, overcast: 0, weather: { cover: 0.3, precip: null, dusty: false, mist: 0, label: 'clear' }, infoAt: 0,
   };
   const mix = (a, b, t) => a + (b - a) * t;
 
@@ -1881,6 +1883,8 @@
         landing.temp[k] = texSample(c.temp, tx, ty);
         const w = wet ? texSample(wet, tx, ty) : 0.5;
         landing.wet[k] = clamp(w + 0.12 * fbm4(n, X * 25 + 7.1, Y * 25 - 3.3, Z * 25 + 1.7), 0, 1);
+        landing.lit[k] = c.lights ? texSample(c.lights, tx, ty) / 255 : 0;
+        landing.ltype[k] = c.lightType ? c.lightType[clamp(Math.round(ty), 0, planet.H - 1) * planet.W + (((Math.round(tx) % planet.W) + planet.W) % planet.W)] : 0;
       }
     }
     landing.base.set(landing.h);
@@ -2097,13 +2101,16 @@
     hideTip();
     landing.lat = lat; landing.lon = lon;
     buildLanding(lat, lon);
+    landing.sun = pinSun();
     recolorLanding();
+    pinWeather();
+    if (landing.v3 && landing.v3.ar) light3D(true);
     landing.ship = { x: LG / 2, y: LG / 2 };
     landing.keys.clear();
     landing.t0 = performance.now(); landing.last = 0;
     const center = landing.biome[(LG / 2) * LG + LG / 2];
     landing.nameEl.textContent = planet.name + ' · ' + Terra.BIOMES[center].name;
-    landing.coordEl.textContent = fmtCoord(lat, lon);
+    updateLandingInfo(true);
     setLandTool(landing.tool);
     landing.root.hidden = false;
     landing.open = true;
@@ -2183,11 +2190,6 @@
     return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
   };
 
-  // Sun for the walking view: low and to one side, so slopes cast light and shade.
-  const SUN3 = (() => {
-    const az = -0.9, el = 0.62;
-    return { az, x: Math.cos(az) * Math.cos(el), y: Math.sin(az) * Math.cos(el), z: Math.sin(el) };
-  })();
   // Natural ground colours per biome (the globe palette is tuned for space, not eye level).
   const REAL3 = (() => {
     const B = Terra.BIOME, r = [];
@@ -2215,11 +2217,11 @@
       const b = landing.biome[k];
       const g = (landing.h[k] - sl) * K;
       if (g < 0 && b !== B.SEA_ICE) { wet[k] = 1; depth[k] = -g; hw[k] = 0; }
-      else {
-        wet[k] = 0; depth[k] = 0; hw[k] = g < 0 ? 0 : g;
-        if (b === B.FOREST || b === B.RAINFOREST || b === B.TAIGA) hw[k] += 0.25 + 0.5 * hash01(k, 7);
-      }
+      else { wet[k] = 0; depth[k] = 0; hw[k] = g < 0 ? 0 : g; }
     }
+    // Ground for walking (trees are scenery you can walk through).
+    if (!v.hg || v.hg.length !== N) v.hg = new Float32Array(N);
+    v.hg.set(hw);
 
     // 2. Ground colour: biome base + large patches + rock on steep slopes + sand at the shore.
     for (let y = 0; y < LG; y++) {
@@ -2250,6 +2252,26 @@
         }
         const vary = 1 + 0.12 * pn + 0.05 * (hash01(x, y) - 0.5);
         v.cr[k] = r * vary; v.cg[k] = g * vary; v.cb[k] = bl * vary;
+      }
+    }
+
+    // 2b. Trees: individual crowns with their own colour, dense in forests and
+    // scattered on grassland and savanna. They also cast shadows at low sun.
+    const TREE = []; TREE[B.RAINFOREST] = 0.5; TREE[B.FOREST] = 0.38; TREE[B.TAIGA] = 0.34; TREE[B.SAVANNA] = 0.035; TREE[B.GRASSLAND] = 0.025;
+    for (let y = 1; y < LG - 1; y++) {
+      for (let x = 1; x < LG - 1; x++) {
+        const k = y * LG + x, b = landing.biome[k], dens = TREE[b] || 0;
+        if (!dens || wet[k] || hash01(x * 3 + 17, y * 5 + 29) > dens) continue;
+        if (Math.hypot(x - landing.ship.x, y - landing.ship.y) < 15) continue; // the landing clearing
+        const taiga = b === B.TAIGA, ht = (taiga ? 1.05 : 0.85) * (0.75 + 0.5 * hash01(x + 51, y + 7));
+        const crown = exotic ? planet.palette[b].map((q) => q * 0.7) : taiga ? [34, 58, 44] : b === B.RAINFOREST ? [26, 66, 30] : b === B.SAVANNA ? [86, 96, 46] : [42, 80, 36];
+        const tone = 0.8 + 0.4 * hash01(x + 9, y + 3), base = hw[k];
+        const put = (kk, hh, shade) => {
+          if (wet[kk] || base + hh <= hw[kk]) return;
+          hw[kk] = base + hh; v.cr[kk] = crown[0] * tone * shade; v.cg[kk] = crown[1] * tone * shade; v.cb[kk] = crown[2] * tone * shade;
+        };
+        put(k, ht, 1.1);
+        put(k - 1, ht * 0.62, 0.9); put(k + 1, ht * 0.62, 0.9); put(k - LG, ht * 0.62, 0.9); put(k + LG, ht * 0.62, 0.9);
       }
     }
 
@@ -2292,22 +2314,234 @@
       }
     }
 
-    // 5. Sunlight: warm direct light, cool sky light in the shade.
+    // 5. Keep the unlit colours and slopes; light3D() lights them with the sun of the moment.
+    if (!v.ar || v.ar.length !== N) {
+      v.ar = new Float32Array(N); v.ag = new Float32Array(N); v.ab = new Float32Array(N);
+      v.gx = new Float32Array(N); v.gy = new Float32Array(N);
+      v.er = new Float32Array(N); v.eg = new Float32Array(N); v.eb = new Float32Array(N);
+    }
+    v.ar.set(v.cr); v.ag.set(v.cg); v.ab.set(v.cb);
+    let maxH = 0;
     for (let y = 0; y < LG; y++) {
       for (let x = 0; x < LG; x++) {
         const k = y * LG + x;
-        if (wet[k]) continue;
-        const gx = hw[y * LG + Math.min(LG - 1, x + 1)] - hw[y * LG + Math.max(0, x - 1)];
-        const gy = hw[Math.min(LG - 1, y + 1) * LG + x] - hw[Math.max(0, y - 1) * LG + x];
-        let nx = -gx, ny = -gy, nz = 2;
-        const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
-        const diff = Math.max(0, nx * SUN3.x + ny * SUN3.y + nz * SUN3.z);
-        const o = ao[k];
-        v.cr[k] *= (0.36 * 0.82 + diff * 0.92 * 1.0) * o;
-        v.cg[k] *= (0.36 * 0.9 + diff * 0.92 * 0.95) * o;
-        v.cb[k] *= (0.36 * 1.05 + diff * 0.92 * 0.84) * o;
+        v.gx[k] = hw[y * LG + Math.min(LG - 1, x + 1)] - hw[y * LG + Math.max(0, x - 1)];
+        v.gy[k] = hw[Math.min(LG - 1, y + 1) * LG + x] - hw[Math.max(0, y - 1) * LG + x];
+        if (hw[k] > maxH) maxH = hw[k];
       }
     }
+    v.maxH = maxH;
+    // 6. Night lights: settlements where the globe shows city lights, glowing lava on scorched ground.
+    v.er.fill(0); v.eg.fill(0); v.eb.fill(0);
+    for (let k = 0; k < N; k++) {
+      const L = landing.lit[k];
+      if (wet[k] || L < 0.08) continue;
+      const x = k % LG, y = (k / LG) | 0, hsh = hash01(x * 7 + 3, y * 13 + 5);
+      if (landing.ltype[k] === 2) { const q = L * (0.5 + 0.9 * hsh); v.er[k] = 255 * q; v.eg[k] = 84 * q; v.eb[k] = 22 * q; }
+      else if (hsh < L * 0.3) { const q = 0.9 + 0.7 * hash01(x, y + 99); v.er[k] = 255 * q; v.eg[k] = 200 * q; v.eb[k] = 124 * q; }
+    }
+    v.litKey = null;
+    light3D(true);
+  }
+
+  // ---------------------------------------------------------------------------
+  // The real sky over the pin: sun position from the planet's actual rotation,
+  // weather from the globe's own cloud layer, day, twilight and night.
+  // ---------------------------------------------------------------------------
+  /** Sun direction at the landing site, in map axes (+x east, +y south, +z up). */
+  function pinSun() {
+    const s = sunPlanet();
+    const la = landing.lat * Math.PI / 180, lo = landing.lon * Math.PI / 180;
+    const cla = Math.cos(la), sla = Math.sin(la), clo = Math.cos(lo), slo = Math.sin(lo);
+    const se = s[0] * clo - s[2] * slo;                                   // east
+    const sn = -s[0] * sla * slo + s[1] * cla - s[2] * sla * clo;          // north
+    const su = s[0] * cla * slo + s[1] * sla + s[2] * cla * clo;           // up
+    return { x: se, y: -sn, z: su, el: Math.asin(clamp(su, -1, 1)), az: Math.atan2(-sn, se) };
+  }
+
+  function localHours() {
+    const s = sunPlanet();
+    const subLon = Math.atan2(s[0], s[2]) * 180 / Math.PI;
+    const h = 12 + (landing.lon - subLon) / 15;
+    return ((h % 24) + 24) % 24;
+  }
+  function localTimeLabel() {
+    const h = localHours(), hh = Math.floor(h), mm = Math.floor((h - hh) * 60);
+    const el = landing.sun ? landing.sun.el : 0.5;
+    const phase = el > 0.12 ? 'day' : el > -0.12 ? (h < 12 ? 'sunrise' : 'sunset') : 'night';
+    return String(hh).padStart(2, '0') + ':' + String(mm).padStart(2, '0') + ' ' + phase;
+  }
+
+  /** Bilinear sample of a W x H grid that wraps in x. */
+  function sampleGrid(arr, Wd, Hd, tx, ty) {
+    let x0 = Math.floor(tx); const fx = tx - x0;
+    let y0 = Math.floor(ty); let fy = ty - y0;
+    x0 = ((x0 % Wd) + Wd) % Wd;
+    const x1 = x0 + 1 === Wd ? 0 : x0 + 1;
+    if (y0 < 0) { y0 = 0; fy = 0; } else if (y0 >= Hd - 1) { y0 = Hd - 1; fy = 0; }
+    const y1 = y0 + 1 < Hd ? y0 + 1 : y0;
+    return (arr[y0 * Wd + x0] * (1 - fx) + arr[y0 * Wd + x1] * fx) * (1 - fy) + (arr[y1 * Wd + x0] * (1 - fx) + arr[y1 * Wd + x1] * fx) * fy;
+  }
+
+  /** Weather at the pin, read from the same cloud layer the globe shows. */
+  function pinWeather() {
+    let cover = 0, n = 0;
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const la = clamp(landing.lat + dy * 1.5, -89, 89);
+        const lo = landing.lon + (dx * 1.5) / Math.max(0.2, Math.cos(la * Math.PI / 180));
+        const val = sampleGrid(climate.clouds, planet.CW, planet.CH, (lo / 360 + 0.5) * planet.CW - 0.5 + view.cloudShift, (0.5 - la / 180) * planet.CH - 0.5);
+        cover += val <= 0 ? 0 : val >= 1 ? 1 : val * val * (3 - 2 * val);
+        n++;
+      }
+    }
+    cover /= n;
+    const c = (LG / 2) * LG + LG / 2, T = landing.temp[c], wetC = landing.wet[c], b = landing.biome[c], B = Terra.BIOME;
+    let precip = null;
+    if (cover > 0.5 && wetC > 0.35 && T > -35 && T < 45) precip = { kind: T < 0.5 ? 'snow' : 'rain', k: Terra.smoothstep(0.5, 0.95, cover) };
+    const dusty = (b === B.DESERT || b === B.SCORCHED) && cover < 0.35;
+    const mist = clamp((wetC - 0.5) * 1.4 + (cover - 0.4) + (T < 8 && T > -5 ? 0.2 : 0), 0, 1);
+    const label = precip ? (precip.k > 0.6 ? 'heavy ' : precip.k < 0.25 ? 'light ' : '') + precip.kind
+      : cover > 0.7 ? 'overcast' : cover > 0.35 ? 'cloudy' : cover > 0.12 ? 'partly cloudy' : dusty ? 'clear, dusty' : 'clear sky';
+    landing.weather = { cover, precip, dusty, mist, label };
+    landing.overcast = Terra.smoothstep(0.45, 0.9, cover);
+  }
+
+  /** Sky colours for the moment: the planet's own blue by day, warm at twilight, dark at night, grey when overcast. */
+  function skyNow() {
+    const base = skyColors(), sun = landing.sun || { el: 0.6 }, sinEl = Math.sin(sun.el);
+    const day = Terra.smoothstep(-0.14, 0.14, sinEl);
+    const tw = Math.exp(-Math.pow(sinEl / 0.13, 2));
+    const oc = landing.overcast || 0;
+    const L = (a, b, t) => [mix(a[0], b[0], t), mix(a[1], b[1], t), mix(a[2], b[2], t)];
+    let zenith = L([6, 9, 24], base.zenith, day), md = L([14, 20, 44], base.mid, day), horizon = L([30, 38, 66], base.horizon, day);
+    horizon = L(horizon, [255, 140, 80], tw * 0.6);
+    md = L(md, [196, 116, 122], tw * 0.3);
+    zenith = L(zenith, [36, 34, 84], tw * 0.25);
+    const grey = (cc, k) => { const l = (cc[0] + cc[1] + cc[2]) / 3; return L(cc, [l + 8, l + 10, l + 16], k); };
+    zenith = grey(zenith, oc * 0.85); md = grey(md, oc * 0.85); horizon = grey(horizon, oc * 0.7);
+    if (landing.weather && landing.weather.dusty) horizon = L(horizon, [222, 196, 150], 0.35 * day);
+    const r = (cc) => cc.map((q) => clamp(Math.round(q), 0, 255));
+    return { zenith: r(zenith), mid: r(md), horizon: r(horizon), day, tw, oc };
+  }
+
+  /** Lights the 3D site with the real sun: direct light, cast shadows, sky light, moonlight and night lights. */
+  function light3D(force) {
+    const v = landing.v3;
+    if (!v || !v.ar) return;
+    const sun = landing.sun || pinSun();
+    const key = Math.round(sun.az * 120) + ':' + Math.round(sun.el * 120) + ':' + Math.round((landing.overcast || 0) * 20);
+    if (!force && key === v.litKey) return;
+    v.litKey = key;
+    const N = LG * LG, hw = v.hw, ao = v.ao, wet = v.wet;
+    const sinEl = Math.sin(sun.el), oc = landing.overcast || 0;
+    const day = Terra.smoothstep(-0.14, 0.14, sinEl);
+    const sunUp = Terra.smoothstep(-0.03, 0.08, sinEl) * (1 - 0.72 * oc);
+    const warm = Terra.smoothstep(0.02, 0.5, sinEl);
+    const sr = 1.05, sg = mix(0.62, 0.97, warm), sb = mix(0.38, 0.9, warm);
+    const sky = skyNow(), m = sky.mid;
+    const amb = 0.3 + 0.18 * oc;
+    const twl = Math.exp(-Math.pow(sinEl / 0.13, 2));
+    const ar = mix(0.1, amb * (0.7 + 0.3 * m[0] / 255), day) + 0.1 * twl, ag = mix(0.12, amb * (0.72 + 0.3 * m[1] / 255), day) + 0.05 * twl, ab = mix(0.2, amb * (0.78 + 0.32 * m[2] / 255), day) + 0.03 * twl;
+    const night = 1 - day, moonK = night * 0.5 * (1 - 0.6 * oc);
+    const hl = Math.hypot(sun.x, sun.y) || 1e-6, dx = sun.x / hl, dy = sun.y / hl, rise = sun.z / hl;
+    const sl = Math.hypot(sun.x, sun.y, Math.max(0.05, sun.z));
+    const lx = sun.x / sl, ly = sun.y / sl, lz = Math.max(0.05, sun.z) / sl;
+    for (let y = 0; y < LG; y++) {
+      for (let x = 0; x < LG; x++) {
+        const k = y * LG + x;
+        let nx = -v.gx[k], ny = -v.gy[k], nz = 2;
+        const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
+        const diff = Math.max(0, nx * lx + ny * ly + nz * lz);
+        let sh = 1;
+        if (!wet[k] && sunUp > 0.01 && diff > 0 && rise > 0 && rise < 4) {
+          const h0 = hw[k] + 0.08;
+          let px = x + 0.5, py = y + 0.5;
+          for (let st = 1; st < 64; st++) {
+            px += dx; py += dy;
+            if (px < 0 || py < 0 || px >= LG || py >= LG) break;
+            const rh = h0 + rise * st;
+            if (rh > v.maxH) break;
+            if (hw[(py | 0) * LG + (px | 0)] > rh) { sh = 0.18; break; }
+          }
+        }
+        const moon = Math.max(0, -nx * lx * 0.6 - ny * ly * 0.6 + nz * 0.8) * moonK;
+        const o = ao[k];
+        const direct = diff * sh * sunUp;
+        let r = v.ar[k] * ((ar + 0.2 * moon) * o + sr * direct);
+        let gg = v.ag[k] * ((ag + 0.24 * moon) * o + sg * direct);
+        let b = v.ab[k] * ((ab + 0.36 * moon) * o + sb * direct);
+        if (night > 0.02 && v.er[k] > 0) { r += v.er[k] * night; gg += v.eg[k] * night; b += v.eb[k] * night; }
+        v.cr[k] = r; v.cg[k] = gg; v.cb[k] = b;
+      }
+    }
+  }
+
+  /** The planet's rings arch across the sky from ringed worlds. */
+  function drawSkyRings(g, proj, sys, alpha) {
+    if (alpha < 0.02) return;
+    const la = landing.lat * Math.PI / 180, sl = Math.sin(la), cl = Math.cos(la);
+    const c = planet.traits.ringColor;
+    g.save();
+    g.lineCap = 'round';
+    [[0, 7, 0.8], [0.06, 4, 0.45], [-0.05, 3, 0.4]].forEach(([off, wdt, a]) => {
+      g.beginPath();
+      let started = false;
+      for (let i = 0; i <= 96; i++) {
+        const b = (i / 96) * Math.PI;
+        const e = Math.cos(b), nn = -Math.sin(b) * sl, u = Math.sin(b) * cl + off;
+        const az = Math.atan2(-nn, e), el = Math.asin(clamp(u, -1, 1));
+        const q = el > -0.02 ? proj(az, el) : null;
+        if (!q) { started = false; continue; }
+        if (started) g.lineTo(q.x, q.y); else { g.moveTo(q.x, q.y); started = true; }
+      }
+      g.strokeStyle = 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + (alpha * a) + ')';
+      g.lineWidth = wdt * sys * (0.45 + Math.abs(sl));
+      g.stroke();
+    });
+    g.restore();
+  }
+
+  /** Rain or snow over the view. */
+  function drawPrecip(g, CW, CH, sys, dt, pr, dayK) {
+    const v = landing.v3, snow = pr.kind === 'snow';
+    const want = Math.round((snow ? 220 : 320) * (0.3 + 0.7 * pr.k));
+    if (!v.drops || v.dropsKind !== pr.kind) { v.drops = []; v.dropsKind = pr.kind; }
+    while (v.drops.length < want) v.drops.push({ x: Math.random() * CW, y: Math.random() * CH, s: 0.5 + Math.random() * 0.8 });
+    if (v.drops.length > want) v.drops.length = want;
+    const light = 0.35 + 0.65 * dayK;
+    if (snow) {
+      g.fillStyle = 'rgba(255,255,255,' + (0.85 * light) + ')';
+      for (const d of v.drops) {
+        d.y += (40 + 50 * d.s) * sys * dt;
+        d.x += Math.sin((d.y + d.s * 300) * 0.02) * 20 * sys * dt;
+        if (d.y > CH) { d.y = -5; d.x = Math.random() * CW; }
+        const r = (1 + 1.6 * d.s) * sys;
+        g.fillRect(d.x, d.y, r, r);
+      }
+    } else {
+      g.strokeStyle = 'rgba(200,214,235,' + (0.36 * light) + ')';
+      g.lineWidth = Math.max(1, sys);
+      g.beginPath();
+      for (const d of v.drops) {
+        d.y += (700 + 500 * d.s) * sys * dt;
+        d.x -= 90 * sys * dt;
+        if (d.y > CH) { d.y = -20; d.x = Math.random() * (CW + 100); }
+        g.moveTo(d.x, d.y); g.lineTo(d.x - 4 * sys, d.y + 16 * d.s * sys);
+      }
+      g.stroke();
+    }
+  }
+
+  /** Header line: coordinates, local time, weather and temperature at the pin. */
+  function updateLandingInfo(force) {
+    const now = performance.now();
+    if (!force && now - landing.infoAt < 500) return;
+    landing.infoAt = now;
+    const c = (LG / 2) * LG + LG / 2, T = Math.round(landing.tNow[c]);
+    const text = fmtCoord(landing.lat, landing.lon) + ' · ' + localTimeLabel() + ' · ' + landing.weather.label + ' · ' +
+      (T > 0 ? '+' : T < 0 ? '−' : '') + Math.abs(T) + ' °C';
+    if (landing.coordEl.textContent !== text) landing.coordEl.textContent = text;
   }
 
   function mirror3(t) {
@@ -2321,7 +2555,14 @@
     const x0 = mx | 0, y0 = my | 0, fx = mx - x0, fy = my - y0;
     const x1 = x0 < LG - 1 ? x0 + 1 : x0, y1 = y0 < LG - 1 ? y0 + 1 : y0;
     const a = y0 * LG + x0, b = y0 * LG + x1, c = y1 * LG + x0, d = y1 * LG + x1;
-    return (v.hw[a] * (1 - fx) + v.hw[b] * fx) * (1 - fy) + (v.hw[c] * (1 - fx) + v.hw[d] * fx) * fy;
+    const H = v.hg || v.hw;
+    return (H[a] * (1 - fx) + H[b] * fx) * (1 - fy) + (H[c] * (1 - fx) + H[d] * fx) * fy;
+  }
+
+  /** Top of whatever is under a position, tree crowns included (keeps the eye above foliage). */
+  function canopy3(x, y) {
+    const v = landing.v3, mx = mirror3(x), my = mirror3(y);
+    return v.hw[(my | 0) * LG + (mx | 0)];
   }
 
   function skyColors() {
@@ -2335,13 +2576,14 @@
   /** Soft cloud band, generated once per planet and scrolled as you turn. */
   function cloudStrip() {
     const v = landing.v3;
-    if (v.clouds && v.cloudsFor === planet) return v.clouds;
+    const cover = clamp(landing.weather ? landing.weather.cover : 0.3, 0.06, 0.95);
+    const ckey = planet.hash + ':' + Math.round(cover * 10);
+    if (v.clouds && v.cloudsKey === ckey) return v.clouds;
     const c = document.createElement('canvas');
     c.width = 1024; c.height = 256;
     const g = c.getContext('2d');
     const rnd = Terra.mulberry32((planet.hash ^ 0x51ed270b) >>> 0);
-    const cover = clamp((climate.stats && climate.stats.cloudCover) || 0.3, 0.12, 0.6);
-    const clusters = Math.round(10 + cover * 30);
+    const clusters = Math.round(6 + cover * 46);
     for (let i = 0; i < clusters; i++) {
       const cx = rnd() * 1024, cy = 70 + rnd() * 140, w = 60 + rnd() * 140;
       for (let j = 0; j < 9; j++) {
@@ -2358,7 +2600,7 @@
         }
       }
     }
-    v.clouds = c; v.cloudsFor = planet;
+    v.clouds = c; v.cloudsKey = ckey;
     return c;
   }
 
@@ -2393,13 +2635,16 @@
     P.z += P.vz * dt;
     if (P.z <= gz) { P.z = gz; P.vz = 0; P.onGround = true; }
     const bob = P.onGround && (fwd || str) ? Math.sin(now / (run > 1 ? 90 : 130)) * 0.05 : 0;
-    P.cam = mix(P.cam, P.z + EYE3 + bob, 1 - Math.exp(-14 * dt));
+    P.cam = mix(P.cam, Math.max(P.z + EYE3 + bob, canopy3(P.x, P.y) + 0.35), 1 - Math.exp(-14 * dt));
 
-    // --- sky ----------------------------------------------------------------
+    // --- sky: the real one over the pin ----------------------------------------
     const cv = landing.cvs, g = landing.ctx, CW = cv.width, CH = cv.height;
     const RH = clamp(Math.round(W3 * CH / Math.max(1, CW)), 150, 1000);
     const v = ensure3D(RH);
-    const sky = skyColors(), hz = sky.horizon, zn = sky.zenith, md = sky.mid;
+    landing.sun = pinSun();
+    if (now - (v.litAt || 0) > 250) { v.litAt = now; light3D(false); }
+    const sky = skyNow(), hz = sky.horizon, zn = sky.zenith, md = sky.mid;
+    const sun = landing.sun, sinEl = Math.sin(sun.el), dayK = sky.day, oc = sky.oc;
     const hor = RH * (0.5 + P.pitch);
     const sxs = CW / W3, sys = CH / RH;
     const focal = (W3 / 2) / TANH3;
@@ -2412,37 +2657,87 @@
     grad.addColorStop(1, 'rgb(' + hz + ')');
     g.fillStyle = grad;
     g.fillRect(0, 0, CW, CH);
-
-    let da = SUN3.az - P.a;
-    da = Math.atan2(Math.sin(da), Math.cos(da));
-    const sunVisible = Math.abs(da) < 1.25;
-    const sunX = (W3 / 2 + Math.tan(clamp(da, -1.4, 1.4)) * focal) * sxs;
-    const sunY = (hor - Math.tan(0.42) * focal) * sys;
+    const proj = (az, el) => {
+      let d = az - P.a;
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      const ce = Math.cos(el), f = ce * Math.cos(d);
+      if (f < 0.06) return null;
+      return { x: (W3 / 2 + (ce * Math.sin(d) / f) * focal) * sxs, y: (hor - (Math.sin(el) / f) * focal) * sys };
+    };
+    // Stars, and the planet's rings, come out as the sky darkens.
+    const starK = (1 - Terra.smoothstep(0.05, 0.55, dayK)) * (1 - oc * 0.9);
+    if (starK > 0.02) {
+      if (!v.stars) {
+        const r = Terra.mulberry32(7331);
+        v.stars = [];
+        for (let i = 0; i < 420; i++) v.stars.push({ az: r() * Math.PI * 2, el: Math.asin(r()), m: 0.3 + r() * 0.7 });
+      }
+      g.fillStyle = '#fff';
+      for (const st of v.stars) {
+        const q = proj(st.az, st.el);
+        if (!q) continue;
+        g.globalAlpha = starK * st.m * (0.75 + 0.25 * Math.sin(now * 0.002 + st.az * 40));
+        const sz = (st.m > 0.85 ? 2 : 1.2) * sys;
+        g.fillRect(q.x, q.y, sz, sz);
+      }
+      g.globalAlpha = 1;
+    }
+    if (planet.traits.rings) drawSkyRings(g, proj, sys, Math.max(starK, 0.28 * (1 - oc)));
+    // Twilight glow on the horizon around the sun.
+    const sunPos = proj(sun.az, Math.max(sun.el, -0.02));
+    if (sky.tw > 0.05 && sunPos) {
+      const R0 = 0.9 * focal * sxs;
+      const tg = g.createRadialGradient(sunPos.x, skyHor, 0, sunPos.x, skyHor, R0);
+      tg.addColorStop(0, 'rgba(255,150,80,' + (0.55 * sky.tw * (1 - oc)) + ')');
+      tg.addColorStop(1, 'rgba(255,120,60,0)');
+      g.fillStyle = tg;
+      g.fillRect(sunPos.x - R0, skyHor - R0, R0 * 2, R0 * 2);
+    }
+    // The sun where it really is: warmer and larger near the horizon, dimmed by cloud.
+    const sunVisible = !!sunPos && sun.el > -0.06;
+    const sunX = sunPos ? sunPos.x : 0, sunY = sunPos ? sunPos.y : 0;
     if (sunVisible) {
-      // Wide warm bloom, then the bright core.
+      const warm = Terra.smoothstep(0, 0.4, sinEl), dim = 1 - 0.85 * oc;
       const R1 = 260 * sys;
       const bloom = g.createRadialGradient(sunX, sunY, 0, sunX, sunY, R1);
-      bloom.addColorStop(0, 'rgba(255,244,214,0.55)');
-      bloom.addColorStop(0.25, 'rgba(255,236,200,0.18)');
+      bloom.addColorStop(0, 'rgba(255,' + Math.round(mix(190, 244, warm)) + ',' + Math.round(mix(140, 214, warm)) + ',' + (0.55 * dim) + ')');
+      bloom.addColorStop(0.25, 'rgba(255,236,200,' + (0.18 * dim) + ')');
       bloom.addColorStop(1, 'rgba(255,230,190,0)');
       g.fillStyle = bloom;
       g.fillRect(sunX - R1, sunY - R1, R1 * 2, R1 * 2);
-      const R2 = 16 * sys;
+      const R2 = (16 + 9 * (1 - warm)) * sys;
       const core = g.createRadialGradient(sunX, sunY, 0, sunX, sunY, R2);
-      core.addColorStop(0, 'rgba(255,255,248,1)');
-      core.addColorStop(0.7, 'rgba(255,252,236,0.95)');
+      core.addColorStop(0, 'rgba(255,255,248,' + dim + ')');
+      core.addColorStop(0.7, 'rgba(255,' + Math.round(mix(206, 252, warm)) + ',' + Math.round(mix(150, 236, warm)) + ',' + (0.95 * dim) + ')');
       core.addColorStop(1, 'rgba(255,248,230,0)');
       g.fillStyle = core;
       g.fillRect(sunX - R2, sunY - R2, R2 * 2, R2 * 2);
     }
-    // Clouds drift slowly and turn with you.
+    // The moon rides opposite the sun at night.
+    if (dayK < 0.5) {
+      const mp = proj(sun.az + Math.PI, clamp(-sun.el, 0.15, 1.1));
+      if (mp) {
+        const mk = (1 - dayK * 2) * (1 - 0.8 * oc), Rm = 9 * sys;
+        const mg = g.createRadialGradient(mp.x, mp.y, 0, mp.x, mp.y, Rm * 6);
+        mg.addColorStop(0, 'rgba(220,230,255,' + 0.25 * mk + ')');
+        mg.addColorStop(1, 'rgba(220,230,255,0)');
+        g.fillStyle = mg;
+        g.fillRect(mp.x - Rm * 6, mp.y - Rm * 6, Rm * 12, Rm * 12);
+        g.fillStyle = 'rgba(236,240,255,' + 0.95 * mk + ')';
+        g.beginPath(); g.arc(mp.x, mp.y, Rm, 0, Math.PI * 2); g.fill();
+        g.fillStyle = 'rgba(176,186,212,' + 0.5 * mk + ')';
+        g.beginPath(); g.arc(mp.x - Rm * 0.3, mp.y - Rm * 0.2, Rm * 0.28, 0, Math.PI * 2); g.arc(mp.x + Rm * 0.35, mp.y + Rm * 0.3, Rm * 0.2, 0, Math.PI * 2); g.fill();
+      }
+    }
+    // Clouds from the globe's own cloud layer over this spot; a grey lid when overcast.
     const strip = cloudStrip();
     const stripH = 0.55 * focal * sys, stripY = (hor - 0.62 * focal) * sys, stripW = stripH * 4;
     let off = -(((P.a / (Math.PI * 2)) * stripW * 2 + now * 0.004 * sys) % stripW);
     if (off > 0) off -= stripW;
-    g.globalAlpha = 0.85;
+    g.globalAlpha = clamp((0.3 + 0.65 * landing.weather.cover) * (0.18 + 0.82 * dayK), 0, 1);
     for (let x = off; x < CW; x += stripW) g.drawImage(strip, x, stripY, stripW, stripH);
     g.globalAlpha = 1;
+    if (oc > 0.05) { g.fillStyle = 'rgba(' + md + ',' + (oc * 0.45) + ')'; g.fillRect(0, 0, CW, skyHor); }
 
     // --- terrain (voxel space, front to back) --------------------------------
     const tRender = performance.now();
@@ -2451,13 +2746,17 @@
     ybuf.fill(RH);
     const cam = P.cam, rx = -sa, ry = ca, tt = now / 1000;
     if (!v.glint || v.glint.length !== W3) v.glint = new Float32Array(W3);
+    const glintK = Terra.smoothstep(-0.02, 0.1, sinEl) * (1 - oc);
     for (let i = 0; i < W3; i++) {
-      let d = SUN3.az - (P.a + Math.atan((i - W3 / 2) / focal));
+      let d = sun.az - (P.a + Math.atan((i - W3 / 2) / focal));
       d = Math.atan2(Math.sin(d), Math.cos(d));
-      v.glint[i] = Math.exp(-(d * d) / 0.018);
+      v.glint[i] = Math.exp(-(d * d) / 0.018) * glintK;
     }
+    const wl = mix(0.22, 1, dayK) * (1 - 0.3 * oc);
     const glint = v.glint;
-    const FOGK = 0.011, fogNorm = 1 / (1 - Math.exp(-FAR3 * FOGK));
+    const wx = landing.weather;
+    const FOGK = 0.011 * (1 + 1.3 * wx.mist + (wx.precip ? 0.8 * wx.precip.k : 0) + (wx.dusty ? 0.5 : 0));
+    const fogNorm = 1 / (1 - Math.exp(-FAR3 * FOGK));
     let z = 0.3, dz = 0.02;
     while (z < FAR3) {
       const lx = P.x + (ca - rx * TANH3) * z, ly = P.y + (sa - ry * TANH3) * z;
@@ -2488,7 +2787,7 @@
           // reflecting the sky more at a distance, with ripples, a sun glint and shore foam.
           const dp = dep[a] * w00 + dep[b] * w10 + dep[c] * w01 + dep[d] * w11;
           const deepK = 1 - Math.exp(-dp * 0.9);
-          let wr = mix(62, 10, deepK), wg = mix(170, 52, deepK), wb = mix(178, 90, deepK);
+          let wr = mix(62, 10, deepK) * wl, wg = mix(170, 52, deepK) * wl, wb = mix(178, 90, deepK) * wl;
           const clear = Math.exp(-dp * 2.4) * 0.7;
           wr = mix(wr, R, clear); wg = mix(wg, G, clear); wb = mix(wb, Bc, clear);
           const rip = Math.sin(sx * 2.3 + tt * 1.8) * Math.sin(sy * 1.9 - tt * 1.4) +
@@ -2553,6 +2852,8 @@
     g.fillStyle = vg;
     g.fillRect(0, 0, CW, CH);
 
+    if (wx.precip) drawPrecip(g, CW, CH, sys, dt, wx.precip, dayK);
+
     // Crosshair marks where tools 1-5 will act.
     g.strokeStyle = 'rgba(255,255,255,0.7)';
     g.lineWidth = Math.max(1, sys);
@@ -2564,7 +2865,8 @@
     const bio = Terra.BIOMES[landing.biome[ci]];
     const em = Math.round(heightAboveSea(ci)), T = Math.round(landing.tNow[ci]);
     const dSea = Math.round((landing.sl - landing.sl0) * 8000);
-    const label = 'On foot: ' + (v.wet[ci] > 0.5 ? 'wading in ' : '') + bio.name + ' · ' +
+    updateLandingInfo(false);
+    const label = 'On foot: ' + localTimeLabel() + ' · ' + wx.label + ' · ' + (v.wet[ci] > 0.5 ? 'wading in ' : '') + bio.name + ' · ' +
       (em < 0 ? Math.abs(em).toLocaleString('en-US') + ' m deep' : em.toLocaleString('en-US') + ' m') + ' · ' +
       (T > 0 ? '+' : T < 0 ? '−' : '') + Math.abs(T) + ' °C' + (dSea ? ' · sea ' + (dSea > 0 ? '+' : '−') + Math.abs(dSea).toLocaleString('en-US') + ' m' : '');
     if (landing.readEl.textContent !== label) landing.readEl.textContent = label;
@@ -2589,8 +2891,8 @@
     if (landing.viewBtn) landing.viewBtn.textContent = is3d ? 'Map and tools (M)' : 'Walk around (M)';
     if (landing.hintEl) {
       landing.hintEl.textContent = is3d
-        ? 'Arrows walk and turn · A/D strafe · Shift run · Space jump · drag to look · F/G raise or lower the sea · 1–5 use a tool at the crosshair'
-        : 'WASD or arrow keys fly the ship · click or drag to use a tool · 1–5 pick a tool · F/G raise or lower the sea';
+        ? 'Arrows walk and turn · A/D strafe · Shift run · Space jump · drag to look · , and . move the clock an hour · F/G sea level · 1–5 tools'
+        : 'WASD or arrow keys fly the ship · click or drag to use a tool · 1–5 pick a tool · , and . move the clock · F/G raise or lower the sea';
     }
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
     landing.look = null;
@@ -2608,6 +2910,14 @@
     if (k === 'escape') { e.preventDefault(); closeLanding(); return; }
     if (k === 'm') { e.preventDefault(); if (landing.view === '3d') setLandView('map'); else enterWalk(); return; }
     if (k === 'f' || k === 'g') { e.preventDefault(); shiftSea(k === 'f' ? 1 : -1); return; }
+    if (k === ',' || k === '.') {
+      e.preventDefault();
+      view.spin += (k === '.' ? 1 : -1) * (Math.PI * 2) / 24;   // one hour on this planet
+      landing.sun = pinSun();
+      if (landing.v3) light3D(true);
+      updateLandingInfo(true);
+      return;
+    }
     if (k >= '1' && k <= '5') {
       e.preventDefault();
       setLandTool(LD_TOOLS[Number(k) - 1].id);
@@ -2678,6 +2988,10 @@
     g.setTransform(d, 0, 0, d, 0, 0);
     g.imageSmoothingEnabled = false;
     g.drawImage(landing.off, 0, 0, S, S);
+    landing.sun = pinSun();
+    const skm = skyNow();
+    if (skm.day < 0.98) { g.fillStyle = 'rgba(6,10,26,' + (1 - skm.day) * 0.55 + ')'; g.fillRect(0, 0, S, S); }
+    updateLandingInfo(false);
 
     // Bases: little domes with a blinking beacon.
     landing.bases.forEach((b) => {
@@ -3931,7 +4245,7 @@
     let moving = false;
     const running = !state.paused && state.speed > 0 && !doom;
     if (running) {
-      view.spin += dt * state.speed * 0.065;
+      view.spin += dt * state.speed * 0.065 * (landing.open ? 0.2 : 1);
       view.cloudShift += dt * (0.5 + state.speed * 0.22);
       moving = true;
     }
