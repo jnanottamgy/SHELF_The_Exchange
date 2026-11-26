@@ -817,10 +817,16 @@
   ];
   let mission = null;
 
-  // Stars: one per planet whose mission you complete (remembered on this device).
-  const RANKS = [[0, 'Cadet'], [1, 'Explorer'], [3, 'Pioneer'], [6, 'Terraformer'], [10, 'World-shaper'], [20, 'Star-forger']];
+  // Stars: one per completed mission, three missions per planet (remembered on this device).
+  const CHAIN = 3;
+  const RANKS = [[0, 'Cadet'], [1, 'Explorer'], [4, 'Pioneer'], [9, 'Terraformer'], [15, 'World-shaper'], [25, 'Star-forger']];
   let earned = new Set();
-  try { earned = new Set(JSON.parse(localStorage.getItem('tinyterra-stars') || '[]').filter((x) => typeof x === 'number').slice(0, 5000)); } catch (e) { earned = new Set(); }
+  try {
+    const raw = JSON.parse(localStorage.getItem('tinyterra-stars') || '[]');
+    earned = new Set((Array.isArray(raw) ? raw : [])
+      .map((x) => (typeof x === 'number' ? x + ':0' : x))           // older saves: one star per planet
+      .filter((x) => typeof x === 'string' && /^\d{1,10}:[0-2]$/.test(x)).slice(0, 15000));
+  } catch (e) { earned = new Set(); }
   function rankFor(n) { let r = RANKS[0][1]; RANKS.forEach(([min, name]) => { if (n >= min) r = name; }); return r; }
   function renderStars(pop) {
     $('stars-count').textContent = String(earned.size);
@@ -829,10 +835,11 @@
     el.title = earned.size + ' star' + (earned.size === 1 ? '' : 's') + ' earned · rank ' + rankFor(earned.size);
     if (pop) { el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop'); }
   }
-  function awardStar() {
-    if (earned.has(planet.hash)) return false;
+  function awardStar(stage) {
+    const key = planet.hash + ':' + stage;
+    if (earned.has(key)) return false;
     const before = rankFor(earned.size);
-    earned.add(planet.hash);
+    earned.add(key);
     try { localStorage.setItem('tinyterra-stars', JSON.stringify(Array.from(earned))); } catch (e) { /* private mode */ }
     renderStars(true);
     return rankFor(earned.size) !== before;
@@ -859,41 +866,85 @@
   const missionEl = $('mission'), missionText = $('mission-text'), missionPct = $('mission-pct'),
     missionFill = $('mission-fill'), missionLabel = $('mission-label');
 
+  /**
+   * Each planet has a fixed chain of 3 missions, chosen from its seed and
+   * skipping any that its default climate already satisfies. Completing one
+   * earns a star and unlocks the next; all three = world mastered.
+   */
+  let missionToken = 0;
   function pickMission() {
-    const st = climate.stats;
-    const start = (planet.hash >>> 3) % MISSIONS.length;
-    let idx = start;
-    for (let k = 0; k < MISSIONS.length; k++) {
-      const i = (start + k) % MISSIONS.length;
-      if (MISSIONS[i].p(st) < 0.9) { idx = i; break; } // skip ones already (nearly) done
+    const base = Terra.applyClimate(planet, Terra.DEFAULTS).stats;
+    const n = MISSIONS.length, start = (planet.hash >>> 3) % n, stride = [1, 3, 5, 7][(planet.hash >>> 7) % 4];
+    const chain = [];
+    for (let k = 0; k < n && chain.length < CHAIN; k++) {
+      const i = (start + k * stride) % n;
+      if (MISSIONS[i].p(base) < 0.9) chain.push(i);
     }
-    mission = { idx, done: false };
+    for (let k = 0; chain.length < CHAIN && k < n; k++) { const i = (start + k * stride) % n; if (!chain.includes(i)) chain.push(i); }
+    let stage = 0;
+    while (stage < CHAIN && earned.has(planet.hash + ':' + stage)) stage++; // resume where you left off
+    mission = { chain, stage, done: false, lockUntil: performance.now() + 900, token: ++missionToken };
     missionEl.classList.remove('done', 'celebrate');
-    missionLabel.textContent = 'Mission';
-    missionText.textContent = MISSIONS[idx].text;
-    missionEl.title = MISSIONS[idx].text;
+    showMissionStage();
+  }
+
+  function pips() {
+    let out = '';
+    for (let i = 0; i < CHAIN; i++) out += i < mission.stage || (i === mission.stage && mission.done) ? '★' : '☆';
+    return out;
+  }
+
+  function showMissionStage() {
+    if (mission.stage >= CHAIN) {
+      missionEl.classList.add('done');
+      missionLabel.textContent = 'World mastered';
+      missionText.textContent = 'All 3 missions done. Roll a new planet (R)';
+      missionEl.title = 'You completed every mission on this planet.';
+      missionFill.style.width = '100%';
+      missionPct.textContent = '★★★';
+      return;
+    }
+    const m = MISSIONS[mission.chain[mission.stage]];
+    missionEl.classList.remove('done');
+    missionLabel.textContent = 'Mission ' + (mission.stage + 1) + '/' + CHAIN;
+    missionText.textContent = m.text;
+    missionEl.title = m.text;
   }
 
   function updateMission() {
-    if (!mission || !climate) return;
-    const raw = MISSIONS[mission.idx].p(climate.stats);
+    if (!mission || !climate || mission.stage >= CHAIN) return;
+    const tok = mission.token;
+    const raw = MISSIONS[mission.chain[mission.stage]].p(climate.stats);
     const p = clamp(Number.isFinite(raw) ? raw : 0, 0, 1);
     const shown = mission.done ? 1 : p;
     missionFill.style.width = (shown * 100).toFixed(1) + '%';
-    missionPct.textContent = Math.floor(shown * 100) + '%';
-    if (!mission.done && p >= 1) {
-      mission.done = true;
-      missionEl.classList.add('done');
-      missionLabel.textContent = 'Complete ★';
-      missionEl.classList.remove('celebrate');
-      void missionEl.offsetWidth;
-      missionEl.classList.add('celebrate');
-      sfx('chime');
-      confetti();
-      const promoted = awardStar();
-      toast(promoted ? 'Mission complete! New rank: ' + rankFor(earned.size) + ' ★'
-        : 'Mission complete! +1 star. Roll a new planet (R) for a new challenge.', 3200);
+    missionPct.textContent = pips() + ' ' + Math.floor(shown * 100) + '%';
+    if (mission.done || p < 1 || performance.now() < mission.lockUntil) {
+      if (!mission.done && p >= 1) setTimeout(() => { if (mission && mission.token === tok) updateMission(); }, mission.lockUntil - performance.now() + 20);
+      return;
     }
+    mission.done = true;
+    missionEl.classList.add('done');
+    missionLabel.textContent = 'Complete ★';
+    missionPct.textContent = pips() + ' 100%';
+    missionEl.classList.remove('celebrate');
+    void missionEl.offsetWidth;
+    missionEl.classList.add('celebrate');
+    sfx('chime');
+    confetti();
+    const promoted = awardStar(mission.stage);
+    const last = mission.stage === CHAIN - 1;
+    toast(promoted ? 'Mission complete! New rank: ' + rankFor(earned.size) + ' ★'
+      : last ? 'World mastered! ★★★ Roll a new planet (R) for new missions.'
+        : 'Mission complete! +1 star. Next mission unlocked…', 3000);
+    setTimeout(() => {
+      if (!mission || mission.token !== tok) return; // planet changed meanwhile
+      mission.stage++;
+      mission.done = false;
+      mission.lockUntil = performance.now() + 900;
+      showMissionStage();
+      updateMission();
+    }, 1700);
   }
 
   // ---------------------------------------------------------------------------
