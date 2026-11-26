@@ -911,3 +911,30 @@ body.gaming .hint, body.gaming .forming, body.gaming .rebuild-btn, body.gaming .
 @media (prefers-reduced-motion: reduce) {
   .game-ui.danger .game-vignette { animation: none; opacity: .25; }
 }
+
+/* ============ Landing sandbox ============ */
+.hud-btn.on { background: rgba(110, 231, 255, .22); border-color: rgba(110, 231, 255, .6); }
+canvas.landing-pick { cursor: crosshair; }
+.landing { position: fixed; inset: 0; z-index: 80; display: flex; flex-direction: column; gap: 10px;
+  padding: 14px 16px 16px; background: rgba(3, 4, 12, .94); color: var(--text, #eaf0ff); backdrop-filter: blur(6px); }
+.landing[hidden] { display: none; }
+.landing-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.landing h2 { margin: 2px 0 0; font-size: 20px; line-height: 1.2; }
+.ld-coord { font-size: 12px; opacity: .7; }
+.landing-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; }
+.ld-canvas { border-radius: 14px; touch-action: none; cursor: crosshair; image-rendering: pixelated;
+  box-shadow: 0 0 0 1px rgba(150, 175, 255, .25), 0 20px 60px rgba(0, 0, 0, .55); }
+.landing-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px 16px; }
+.ld-tools { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+.ld-tools button { font: inherit; font-size: 13px; padding: 7px 12px; border-radius: 999px; cursor: pointer;
+  border: 1px solid rgba(150, 175, 255, .3); background: rgba(20, 26, 56, .7); color: inherit; }
+.ld-tools button:hover { border-color: rgba(110, 231, 255, .6); }
+.ld-tools button.on { background: var(--accent, #6ee7ff); color: #04121a; border-color: transparent; font-weight: 600; }
+.ld-read { font-size: 13px; opacity: .92; min-width: 240px; text-align: center; font-variant-numeric: tabular-nums; }
+.ld-hint { font-size: 12px; opacity: .6; text-align: center; }
+
+.ld-actions { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.landing.walking .ld-canvas { cursor: grab; image-rendering: auto; }
+.landing.walking .ld-canvas:active { cursor: grabbing; }
+.ld-actions .pill-btn { white-space: nowrap; }
+.ld-actions .pill-btn { width: auto; min-width: 0; height: auto; padding: 8px 14px; font-size: 13px; }

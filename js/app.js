@@ -1771,7 +1771,11 @@
       const quick = performance.now() - drag.t > 80;
       if (quick) { view.vyaw = 0; view.vpitch = 0; view.vpan = 0; } // held still before release: no fling
       if (!drag.moved && e.type === 'pointerup') {
-        if (e.pointerType !== 'mouse') showTipAt(e.clientX, e.clientY);
+        if (landing.pickMode) {
+          const info = pick(e.clientX, e.clientY);
+          if (info) openLanding(info.lat, info.lon);
+          else toast('Click on the planet itself to land');
+        } else if (e.pointerType !== 'mouse') showTipAt(e.clientX, e.clientY);
       }
       drag = null;
     }
@@ -1802,6 +1806,929 @@
     return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || t.isContentEditable;
   }
 
+  // ---------------------------------------------------------------------------
+  // Landing: pick any point on the planet, land a ship there and play in a
+  // sandbox of that area. The local map is built from the planet's own height,
+  // temperature and moisture fields plus seeded fine detail, so the same site
+  // on the same planet always looks the same.
+  // ---------------------------------------------------------------------------
+  const LG = 160;          // local grid: LG x LG cells
+  const LAND_SPAN = 7;     // degrees of latitude covered by the local map
+  const LD_TOOLS = [
+    { id: 'raise', label: 'Raise land' },
+    { id: 'lower', label: 'Dig' },
+    { id: 'flood', label: 'Flood' },
+    { id: 'plant', label: 'Plant forest' },
+    { id: 'base', label: 'Build base' },
+  ];
+  const landing = {
+    open: false, pickMode: false, root: null, cvs: null, ctx: null, off: null, octx: null, img: null,
+    h: new Float32Array(LG * LG), base: new Float32Array(LG * LG), temp: new Float32Array(LG * LG),
+    wet: new Float32Array(LG * LG), em: new Float32Array(LG * LG), tNow: new Float32Array(LG * LG),
+    biome: new Uint8Array(LG * LG), flora: new Uint8Array(LG * LG),
+    sl: 0, datum: 0, amp: 1, range: 1, hasSea: true, tool: 'raise', painting: false, bases: [],
+    ship: { x: LG / 2, y: LG / 2 }, keys: new Set(), t0: 0, last: 0, raf: 0, size: 300, pointer: null,
+    noise: null, noiseFor: null, lat: 0, lon: 0,
+  };
+  const mix = (a, b, t) => a + (b - a) * t;
+
+  function landNoise() {
+    if (landing.noiseFor !== planet) {
+      landing.noise = Terra.makeNoise3(Terra.mulberry32((planet.hash ^ 0x2545f491) >>> 0));
+      landing.noiseFor = planet;
+    }
+    return landing.noise;
+  }
+  function fbm4(n, x, y, z) {
+    let s = 0, a = 0.5, f = 1;
+    for (let o = 0; o < 4; o++) { s += a * n(x * f, y * f, z * f); a *= 0.5; f *= 2.03; }
+    return s / 0.9375;
+  }
+  /** Bilinear sample of a planet texture field (wraps in longitude). */
+  function texSample(arr, tx, ty) {
+    const W = planet.W, H = planet.H;
+    let x0 = Math.floor(tx); const fx = tx - x0;
+    let y0 = Math.floor(ty); let fy = ty - y0;
+    x0 = ((x0 % W) + W) % W;
+    const x1 = x0 + 1 === W ? 0 : x0 + 1;
+    if (y0 < 0) { y0 = 0; fy = 0; } else if (y0 >= H - 1) { y0 = H - 1; fy = 0; }
+    const y1 = y0 + 1 < H ? y0 + 1 : y0;
+    const a = arr[y0 * W + x0], b = arr[y0 * W + x1], c = arr[y1 * W + x0], d = arr[y1 * W + x1];
+    return (a * (1 - fx) + b * fx) * (1 - fy) + (c * (1 - fx) + d * fx) * fy;
+  }
+
+  function buildLanding(lat, lon) {
+    const c = climate, n = landNoise();
+    landing.sl = c.seaLevel;
+    landing.datum = Math.max(c.seaLevel, Number.isFinite(c.median) ? c.median : c.seaLevel);
+    landing.range = Math.max(1e-6, c.hmax - c.hmin);
+    landing.amp = landing.range * (0.03 + 0.05 * state.terrain / 100);
+    landing.hasSea = state.water > 0;
+    const cosL = Math.max(0.12, Math.cos(lat * Math.PI / 180));
+    const lonSpan = Math.min(120, LAND_SPAN / cosL);
+    const wet = c.wet || null;
+    for (let j = 0; j < LG; j++) {
+      const la = clamp(lat + (0.5 - (j + 0.5) / LG) * LAND_SPAN, -89.9, 89.9);
+      const lr = la * Math.PI / 180, cl = Math.cos(lr), sn = Math.sin(lr);
+      const ty = (0.5 - la / 180) * planet.H - 0.5;
+      for (let i = 0; i < LG; i++) {
+        const lo = lon + ((i + 0.5) / LG - 0.5) * lonSpan;
+        const lor = lo * Math.PI / 180;
+        const X = cl * Math.sin(lor), Y = sn, Z = cl * Math.cos(lor);
+        const tx = (lo / 360 + 0.5) * planet.W - 0.5;
+        const k = j * LG + i;
+        landing.h[k] = texSample(c.height, tx, ty) + landing.amp * fbm4(n, X * 60, Y * 60, Z * 60);
+        landing.temp[k] = texSample(c.temp, tx, ty);
+        const w = wet ? texSample(wet, tx, ty) : 0.5;
+        landing.wet[k] = clamp(w + 0.12 * fbm4(n, X * 25 + 7.1, Y * 25 - 3.3, Z * 25 + 1.7), 0, 1);
+      }
+    }
+    landing.base.set(landing.h);
+    landing.flora.fill(0);
+    landing.bases = [];
+  }
+
+  function landBiome(k) {
+    const B = Terra.BIOME, e = landing.h[k], sl = landing.sl;
+    if (e < sl) {
+      const depth = (sl - e) * 8000;
+      landing.em[k] = -depth; landing.tNow[k] = landing.temp[k];
+      if (landing.temp[k] < -9) return B.SEA_ICE;
+      return depth < 220 ? B.SHALLOW : depth < 2600 ? B.OCEAN : B.DEEP;
+    }
+    const dr = Math.max(0, e - landing.datum), em = 11000 * dr * Math.sqrt(dr);
+    const d0 = Math.max(0, landing.base[k] - landing.datum), em0 = 11000 * d0 * Math.sqrt(d0);
+    const T = landing.temp[k] - 6.5 * (em - em0) / 1000; // raised land gets colder
+    landing.em[k] = em; landing.tNow[k] = T;
+    const ds = e - sl, above = 11000 * ds * Math.sqrt(ds), me = landing.wet[k];
+    if (T > 52) return B.SCORCHED;
+    if (T < -18) return B.ICE;
+    if (T < -5) return B.SNOW;
+    if (em > 4300 && T < 30) return B.MOUNTAIN;
+    if (landing.flora[k]) return T >= 22 ? B.RAINFOREST : T >= 9 ? B.FOREST : B.TAIGA;
+    if (above < 30 && landing.hasSea && T > 1) return B.BEACH;
+    if (T < 3) return B.TUNDRA;
+    if (T < 9) return me > 0.45 ? B.TAIGA : B.TUNDRA;
+    if (T < 22) return me < 0.25 ? B.DESERT : me < 0.5 ? B.GRASSLAND : B.FOREST;
+    return me < 0.3 ? B.DESERT : me < 0.5 ? B.SAVANNA : B.RAINFOREST;
+  }
+
+  function recolorLanding() {
+    const B = Terra.BIOME, pal = planet.palette, sl = landing.sl, data = landing.img.data, h = landing.h;
+    const K = 2.4 / Math.max(1e-6, landing.amp);
+    for (let j = 0; j < LG; j++) {
+      for (let i = 0; i < LG; i++) {
+        const k = j * LG + i;
+        const b = landBiome(k);
+        landing.biome[k] = b;
+        let r, g, bl;
+        if (h[k] < sl && b !== B.SEA_ICE) {
+          const t = Math.sqrt(clamp((sl - h[k]) * 8000 / 5200, 0, 1));
+          const cs = pal[B.SHALLOW], cd = pal[B.DEEP];
+          r = mix(cs[0], cd[0], t); g = mix(cs[1], cd[1], t); bl = mix(cs[2], cd[2], t);
+        } else {
+          const c = pal[b];
+          r = c[0]; g = c[1]; bl = c[2];
+          if (b !== B.SNOW && b !== B.ICE && b !== B.SCORCHED && b !== B.SEA_ICE) {
+            const kk = Terra.smoothstep(1800, 4600, landing.em[k]) * 0.85;
+            r = mix(r, 118, kk); g = mix(g, 108, kk); bl = mix(bl, 98, kk);
+          }
+          const l = i > 0 ? k - 1 : k, rt = i < LG - 1 ? k + 1 : k, u = j > 0 ? k - LG : k, dn = j < LG - 1 ? k + LG : k;
+          const sh = 1 + clamp(((h[l] - h[rt]) + (h[u] - h[dn])) * K, -0.45, 0.45);
+          r *= sh; g *= sh; bl *= sh;
+        }
+        const o = k * 4;
+        data[o] = r; data[o + 1] = g; data[o + 2] = bl; data[o + 3] = 255;
+      }
+    }
+    landing.octx.putImageData(landing.img, 0, 0);
+    if (landing.v3) build3D();
+  }
+
+  function ensureLandingDom() {
+    if (landing.root) return;
+    const root = document.createElement('div');
+    root.className = 'landing';
+    root.hidden = true;
+    root.setAttribute('role', 'dialog');
+    root.setAttribute('aria-modal', 'true');
+    root.setAttribute('aria-label', 'Landing site sandbox');
+    // Static markup only; every dynamic value is set with textContent below.
+    root.innerHTML =
+      '<div class="landing-top">' +
+        '<div><div class="eyebrow">Landing site</div><h2 class="ld-name"></h2><div class="ld-coord"></div></div>' +
+        '<div class="ld-actions"><button type="button" class="pill-btn ld-view">Walk around (M)</button>' +
+        '<button type="button" class="pill-btn ld-leave">Lift off (Esc)</button></div>' +
+      '</div>' +
+      '<div class="landing-stage"><canvas class="ld-canvas"></canvas></div>' +
+      '<div class="landing-bar">' +
+        '<div class="ld-tools" role="group" aria-label="Sandbox tools"></div>' +
+        '<div class="ld-read" aria-live="polite"></div>' +
+        '<div class="ld-hint">WASD or arrow keys fly the ship · click or drag to use a tool · 1–5 pick a tool</div>' +
+      '</div>';
+    document.body.appendChild(root);
+    landing.root = root;
+    landing.nameEl = root.querySelector('.ld-name');
+    landing.coordEl = root.querySelector('.ld-coord');
+    landing.readEl = root.querySelector('.ld-read');
+    landing.stage = root.querySelector('.landing-stage');
+    landing.cvs = root.querySelector('.ld-canvas');
+    landing.ctx = landing.cvs.getContext('2d');
+    landing.off = document.createElement('canvas');
+    landing.off.width = landing.off.height = LG;
+    landing.octx = landing.off.getContext('2d');
+    landing.img = landing.octx.createImageData(LG, LG);
+    const tools = root.querySelector('.ld-tools');
+    LD_TOOLS.forEach((t, idx) => {
+      const b = document.createElement('button');
+      b.type = 'button'; b.dataset.tool = t.id;
+      b.textContent = (idx + 1) + ' · ' + t.label;
+      b.addEventListener('click', () => setLandTool(t.id));
+      tools.appendChild(b);
+    });
+    const reset = document.createElement('button');
+    reset.type = 'button'; reset.textContent = 'Reset area';
+    reset.addEventListener('click', () => {
+      landing.h.set(landing.base); landing.flora.fill(0); landing.bases = []; landing.sl = landing.sl0;
+      recolorLanding(); toast('Area restored');
+    });
+    tools.appendChild(reset);
+    root.querySelector('.ld-leave').addEventListener('click', closeLanding);
+    landing.viewBtn = root.querySelector('.ld-view');
+    landing.hintEl = root.querySelector('.ld-hint');
+    landing.viewBtn.addEventListener('click', () => { if (landing.view === '3d') setLandView('map'); else enterWalk(); });
+
+    const cellAt = (e) => {
+      const r = landing.cvs.getBoundingClientRect();
+      return { x: ((e.clientX - r.left) / r.width) * LG, y: ((e.clientY - r.top) / r.height) * LG };
+    };
+    landing.cvs.addEventListener('pointerdown', (e) => {
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      try { landing.cvs.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
+      if (landing.view === '3d') { landing.look = { x: e.clientX, y: e.clientY }; return; }
+      landing.painting = true;
+      const p = cellAt(e);
+      landing.pointer = p;
+      applyLandTool(p.x, p.y, true);
+    });
+    landing.cvs.addEventListener('pointermove', (e) => {
+      if (landing.view === '3d') {
+        if (landing.look && landing.pl) {
+          landing.pl.a += (e.clientX - landing.look.x) * 0.006;
+          landing.pl.pitch = clamp(landing.pl.pitch - (e.clientY - landing.look.y) * 0.0022, -0.45, 0.6);
+          landing.look = { x: e.clientX, y: e.clientY };
+        }
+        return;
+      }
+      const p = cellAt(e);
+      landing.pointer = p;
+      if (landing.painting) applyLandTool(p.x, p.y, false);
+    });
+    const stop = () => { landing.painting = false; landing.look = null; };
+    landing.cvs.addEventListener('pointerup', stop);
+    landing.cvs.addEventListener('pointercancel', stop);
+    landing.cvs.addEventListener('pointerleave', () => { landing.pointer = null; });
+    window.addEventListener('resize', () => { if (landing.open) sizeLanding(); });
+    window.addEventListener('keyup', (e) => { landing.keys.delete(String(e.key).toLowerCase()); });
+  }
+
+  function setLandTool(id) {
+    landing.tool = id;
+    landing.root.querySelectorAll('.ld-tools button[data-tool]').forEach((b) => {
+      const on = b.dataset.tool === id;
+      b.classList.toggle('on', on);
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+  }
+
+  function applyLandTool(cx, cy, first) {
+    const sl = landing.sl, range = landing.range;
+    if (cx < 0 || cy < 0 || cx >= LG || cy >= LG) return;
+    if (landing.tool === 'base') {
+      if (!first) return;
+      const k = (cy | 0) * LG + (cx | 0);
+      if (landing.h[k] < sl) { toast('Bases need dry land'); return; }
+      if (landing.bases.length >= 24) landing.bases.shift();
+      landing.bases.push({ x: cx, y: cy, t: performance.now() });
+      try { sfx('click'); } catch (err) { /* sound is optional */ }
+      return;
+    }
+    const R = 6;
+    for (let dy = -R; dy <= R; dy++) {
+      const y = (cy | 0) + dy;
+      if (y < 0 || y >= LG) continue;
+      for (let dx = -R; dx <= R; dx++) {
+        const x = (cx | 0) + dx;
+        if (x < 0 || x >= LG) continue;
+        const d2 = dx * dx + dy * dy;
+        if (d2 > R * R) continue;
+        const w = 1 - d2 / (R * R), k = y * LG + x;
+        if (landing.tool === 'raise') landing.h[k] = Math.min(climate.hmax, landing.h[k] + 0.006 * range * w);
+        else if (landing.tool === 'lower') landing.h[k] = Math.max(climate.hmin, landing.h[k] - 0.006 * range * w);
+        else if (landing.tool === 'flood') { if (landing.h[k] > sl - 0.004 * range * w) landing.h[k] = sl - 0.004 * range * w - 1e-5; }
+        else if (landing.tool === 'plant') { if (landing.h[k] >= sl && w > 0.15) landing.flora[k] = 1; }
+      }
+    }
+    recolorLanding();
+  }
+
+  function sizeLanding() {
+    const r = landing.stage.getBoundingClientRect();
+    const d = Math.min(window.devicePixelRatio || 1, 2);
+    let w, h;
+    if (landing.view === '3d') { w = Math.max(200, Math.floor(r.width)); h = Math.max(150, Math.floor(r.height)); }
+    else { w = h = Math.max(200, Math.floor(Math.min(r.width, r.height))); }
+    landing.size = Math.min(w, h);
+    landing.cvs.style.width = w + 'px';
+    landing.cvs.style.height = h + 'px';
+    landing.cvs.width = Math.round(w * d);
+    landing.cvs.height = Math.round(h * d);
+    landing.dpr = d;
+  }
+
+  function fmtCoord(lat, lon) {
+    return Math.abs(lat).toFixed(1) + '° ' + (lat >= 0 ? 'N' : 'S') + ' · ' + Math.abs(lon).toFixed(1) + '° ' + (lon >= 0 ? 'E' : 'W');
+  }
+
+  function openLanding(lat, lon) {
+    if (!planet || !climate) { toast('Wait a moment, the planet is still forming'); return; }
+    ensureLandingDom();
+    setLandPick(false);
+    hideTip();
+    landing.lat = lat; landing.lon = lon;
+    buildLanding(lat, lon);
+    recolorLanding();
+    landing.ship = { x: LG / 2, y: LG / 2 };
+    landing.keys.clear();
+    landing.t0 = performance.now(); landing.last = 0;
+    const center = landing.biome[(LG / 2) * LG + LG / 2];
+    landing.nameEl.textContent = planet.name + ' · ' + Terra.BIOMES[center].name;
+    landing.coordEl.textContent = fmtCoord(lat, lon);
+    setLandTool(landing.tool);
+    landing.root.hidden = false;
+    landing.open = true;
+    landing.sl0 = landing.sl;
+    landing.walked = false;
+    landing.pl = null;
+    setLandView('map');
+    try { sfx('preset'); } catch (err) { /* sound is optional */ }
+    cancelAnimationFrame(landing.raf);
+    landing.raf = requestAnimationFrame(landFrame);
+  }
+
+  function closeLanding() {
+    if (!landing.open) return;
+    landing.open = false;
+    landing.painting = false;
+    landing.keys.clear();
+    cancelAnimationFrame(landing.raf);
+    landing.root.hidden = true;
+    toast('Lifted off from ' + planet.name);
+    dirty = true;
+  }
+
+  function setLandPick(on) {
+    landing.pickMode = !!on;
+    dom.canvas.classList.toggle('landing-pick', landing.pickMode);
+    const b = document.getElementById('btn-land');
+    if (b) { b.classList.toggle('on', landing.pickMode); b.setAttribute('aria-pressed', landing.pickMode ? 'true' : 'false'); }
+  }
+
+  /** E key or the Land button: land under the cursor, or arm click-to-land. */
+  function landCommand(fromKey) {
+    if (landing.open) return;
+    if (fromKey && hover) {
+      const info = pick(hover.x, hover.y);
+      if (info) { openLanding(info.lat, info.lon); return; }
+    }
+    setLandPick(!landing.pickMode);
+    if (landing.pickMode) toast('Click anywhere on the planet to land');
+  }
+
+  // ---------------------------------------------------------------------------
+  // On foot: a simple 3D free-roam view of the landing site. A "voxel space"
+  // height-map renderer (one vertical strip per screen column, drawn front to
+  // back) turns the local map into rolling 3D terrain with water, trees, the
+  // landed ship and any bases. The map is mirrored at its edges so you can
+  // keep walking. Demo-grade on purpose: fast and good-looking, not exact.
+  // ---------------------------------------------------------------------------
+  // Render width adapts to the machine: sharper on fast laptops, smooth on slow ones.
+  let W3 = 720;
+  const FAR3 = 150, TANH3 = 0.62, EYE3 = 1.15;
+  const HEIGHT_UNITS = 40; // world height of the planet's full elevation range
+
+  function ensure3D(rh) {
+    let v = landing.v3;
+    if (!v) {
+      v = landing.v3 = {
+        hw: new Float32Array(LG * LG), cr: new Float32Array(LG * LG), cg: new Float32Array(LG * LG),
+        cb: new Float32Array(LG * LG), wet: new Float32Array(LG * LG), off: document.createElement('canvas'),
+        rh: 0, rw: 0, img: null, px: null, octx: null, ybuf: null, ema: 12, frames: 0,
+      };
+    }
+    if (v.rh !== rh || v.rw !== W3) {
+      v.rh = rh; v.rw = W3;
+      v.ybuf = new Int32Array(W3);
+      v.off.width = W3; v.off.height = rh;
+      v.octx = v.off.getContext('2d');
+      v.img = v.octx.createImageData(W3, rh);
+      v.px = new Uint32Array(v.img.data.buffer);
+    }
+    return v;
+  }
+
+  const hash01 = (x, y) => {
+    let h = Math.imul(x | 0, 374761393) ^ Math.imul(y | 0, 668265263);
+    h = Math.imul(h ^ (h >>> 13), 1274126177);
+    return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+  };
+
+  // Sun for the walking view: low and to one side, so slopes cast light and shade.
+  const SUN3 = (() => {
+    const az = -0.9, el = 0.62;
+    return { az, x: Math.cos(az) * Math.cos(el), y: Math.sin(az) * Math.cos(el), z: Math.sin(el) };
+  })();
+  // Natural ground colours per biome (the globe palette is tuned for space, not eye level).
+  const REAL3 = (() => {
+    const B = Terra.BIOME, r = [];
+    r[B.BEACH] = [218, 200, 156]; r[B.DESERT] = [208, 174, 118]; r[B.SAVANNA] = [172, 156, 92];
+    r[B.GRASSLAND] = [96, 134, 58]; r[B.FOREST] = [48, 88, 42]; r[B.RAINFOREST] = [30, 74, 38];
+    r[B.TAIGA] = [44, 74, 56]; r[B.TUNDRA] = [130, 126, 102]; r[B.SNOW] = [238, 242, 248];
+    r[B.ICE] = [204, 226, 242]; r[B.MOUNTAIN] = [120, 112, 104]; r[B.SCORCHED] = [86, 48, 36];
+    r[B.SEA_ICE] = [224, 236, 246];
+    return r;
+  })();
+  const ROCK3 = [112, 106, 100], SAND3 = [214, 198, 154], SEABED3 = [176, 162, 124];
+
+  /** Rebuilds the 3D height and colour maps from the local sandbox. */
+  function build3D() {
+    const v = ensure3D(landing.v3 ? landing.v3.rh : 236);
+    const B = Terra.BIOME, sl = landing.sl, K = HEIGHT_UNITS / landing.range, n = landNoise();
+    const N = LG * LG, hw = v.hw, wet = v.wet;
+    if (!v.depth || v.depth.length !== N) { v.depth = new Float32Array(N); v.ao = new Float32Array(N); v.tmp = new Float32Array(N); }
+    const depth = v.depth;
+    const exotic = planet.traits && planet.traits.flora !== 'Green';
+    const isFlora = (b) => b === B.FOREST || b === B.RAINFOREST || b === B.TAIGA || b === B.GRASSLAND || b === B.SAVANNA;
+
+    // 1. Heights, water depth and a lumpy tree canopy.
+    for (let k = 0; k < N; k++) {
+      const b = landing.biome[k];
+      const g = (landing.h[k] - sl) * K;
+      if (g < 0 && b !== B.SEA_ICE) { wet[k] = 1; depth[k] = -g; hw[k] = 0; }
+      else {
+        wet[k] = 0; depth[k] = 0; hw[k] = g < 0 ? 0 : g;
+        if (b === B.FOREST || b === B.RAINFOREST || b === B.TAIGA) hw[k] += 0.25 + 0.5 * hash01(k, 7);
+      }
+    }
+
+    // 2. Ground colour: biome base + large patches + rock on steep slopes + sand at the shore.
+    for (let y = 0; y < LG; y++) {
+      for (let x = 0; x < LG; x++) {
+        const k = y * LG + x, b = landing.biome[k];
+        const pn = fbm4(n, x * 0.07 + 11.3, y * 0.07 - 4.1, 2.9);
+        let c;
+        if (wet[k]) c = SEABED3;
+        else if (exotic && isFlora(b)) c = planet.palette[b].map((q) => q * 0.85);
+        else c = REAL3[b] || planet.palette[b];
+        let r = c[0], g = c[1], bl = c[2];
+        if (!wet[k]) {
+          if (b === B.GRASSLAND || b === B.SAVANNA) {
+            const dry = clamp(0.5 + pn, 0, 1) * 0.35;
+            r = mix(r, 150, dry); g = mix(g, 146, dry); bl = mix(bl, 78, dry);
+          }
+          const cold = b === B.SNOW || b === B.ICE || b === B.SEA_ICE;
+          if (!cold && hw[k] < 0.35 && landing.tNow[k] > 2) {
+            const s = (1 - hw[k] / 0.35) * 0.7;
+            r = mix(r, SAND3[0], s); g = mix(g, SAND3[1], s); bl = mix(bl, SAND3[2], s);
+          }
+          const gx = hw[y * LG + Math.min(LG - 1, x + 1)] - hw[y * LG + Math.max(0, x - 1)];
+          const gy = hw[Math.min(LG - 1, y + 1) * LG + x] - hw[Math.max(0, y - 1) * LG + x];
+          const slope = Math.hypot(gx, gy) * 0.5;
+          const rk = Terra.smoothstep(0.5, 1.1, slope) * (cold ? 0.45 : 0.85);
+          const rv = 0.9 + 0.2 * pn;
+          r = mix(r, ROCK3[0] * rv, rk); g = mix(g, ROCK3[1] * rv, rk); bl = mix(bl, ROCK3[2] * rv, rk);
+        }
+        const vary = 1 + 0.12 * pn + 0.05 * (hash01(x, y) - 0.5);
+        v.cr[k] = r * vary; v.cg[k] = g * vary; v.cb[k] = bl * vary;
+      }
+    }
+
+    // 3. Landed ship and bases.
+    const bump = (cx, cy, R, H, col, ring, cone) => {
+      const k0 = clamp(cy | 0, 0, LG - 1) * LG + clamp(cx | 0, 0, LG - 1);
+      const base = hw[k0];
+      for (let y = Math.floor(cy - R); y <= Math.ceil(cy + R); y++) {
+        if (y < 0 || y >= LG) continue;
+        for (let x = Math.floor(cx - R); x <= Math.ceil(cx + R); x++) {
+          if (x < 0 || x >= LG) continue;
+          const d = Math.hypot(x - cx, y - cy) / R;
+          if (d >= 1) continue;
+          const k = y * LG + x;
+          const add = cone ? H * (1 - d) : H * Math.sqrt(1 - d * d);
+          if (base + add <= hw[k]) continue;
+          hw[k] = base + add; wet[k] = 0; depth[k] = 0;
+          const c = ring && d > 0.55 && d < 0.72 ? ring : col;
+          v.cr[k] = c[0]; v.cg[k] = c[1]; v.cb[k] = c[2];
+        }
+      }
+    };
+    landing.bases.forEach((b) => bump(b.x, b.y, 2.2, 1.6, [236, 240, 250], [110, 231, 255], false));
+    bump(landing.ship.x, landing.ship.y, 1.1, 2.4, [206, 212, 226], null, true);
+
+    // 4. Ambient occlusion: valleys and hollows are a little darker (box blur of height).
+    const tmp = v.tmp, ao = v.ao, R = 3, span = 2 * R + 1;
+    for (let y = 0; y < LG; y++) {
+      for (let x = 0; x < LG; x++) {
+        let s = 0;
+        for (let d = -R; d <= R; d++) s += hw[y * LG + clamp(x + d, 0, LG - 1)];
+        tmp[y * LG + x] = s / span;
+      }
+    }
+    for (let y = 0; y < LG; y++) {
+      for (let x = 0; x < LG; x++) {
+        let s = 0;
+        for (let d = -R; d <= R; d++) s += tmp[clamp(y + d, 0, LG - 1) * LG + x];
+        ao[y * LG + x] = clamp(1 - (s / span - hw[y * LG + x]) * 0.22, 0.62, 1.06);
+      }
+    }
+
+    // 5. Sunlight: warm direct light, cool sky light in the shade.
+    for (let y = 0; y < LG; y++) {
+      for (let x = 0; x < LG; x++) {
+        const k = y * LG + x;
+        if (wet[k]) continue;
+        const gx = hw[y * LG + Math.min(LG - 1, x + 1)] - hw[y * LG + Math.max(0, x - 1)];
+        const gy = hw[Math.min(LG - 1, y + 1) * LG + x] - hw[Math.max(0, y - 1) * LG + x];
+        let nx = -gx, ny = -gy, nz = 2;
+        const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
+        const diff = Math.max(0, nx * SUN3.x + ny * SUN3.y + nz * SUN3.z);
+        const o = ao[k];
+        v.cr[k] *= (0.36 * 0.82 + diff * 0.92 * 1.0) * o;
+        v.cg[k] *= (0.36 * 0.9 + diff * 0.92 * 0.95) * o;
+        v.cb[k] *= (0.36 * 1.05 + diff * 0.92 * 0.84) * o;
+      }
+    }
+  }
+
+  function mirror3(t) {
+    const L = LG - 1, p = 2 * L;
+    t = ((t % p) + p) % p;
+    return t > L ? p - t : t;
+  }
+  /** Bilinear height under a world position (mirrored map). */
+  function ground3(x, y) {
+    const v = landing.v3, mx = mirror3(x), my = mirror3(y);
+    const x0 = mx | 0, y0 = my | 0, fx = mx - x0, fy = my - y0;
+    const x1 = x0 < LG - 1 ? x0 + 1 : x0, y1 = y0 < LG - 1 ? y0 + 1 : y0;
+    const a = y0 * LG + x0, b = y0 * LG + x1, c = y1 * LG + x0, d = y1 * LG + x1;
+    return (v.hw[a] * (1 - fx) + v.hw[b] * fx) * (1 - fy) + (v.hw[c] * (1 - fx) + v.hw[d] * fx) * fy;
+  }
+
+  function skyColors() {
+    const atm = (climate && climate.stats && climate.stats.atmosphere) || [96, 166, 255];
+    const horizon = [mix(atm[0], 236, 0.62), mix(atm[1], 240, 0.62), mix(atm[2], 246, 0.62)].map((c) => c | 0);
+    const mid = [mix(atm[0], 150, 0.35), mix(atm[1], 190, 0.35), mix(atm[2], 235, 0.35)].map((c) => c | 0);
+    const zenith = [atm[0] * 0.28 + 12, atm[1] * 0.36 + 22, atm[2] * 0.6 + 40].map((c) => Math.min(255, c) | 0);
+    return { horizon, mid, zenith };
+  }
+
+  /** Soft cloud band, generated once per planet and scrolled as you turn. */
+  function cloudStrip() {
+    const v = landing.v3;
+    if (v.clouds && v.cloudsFor === planet) return v.clouds;
+    const c = document.createElement('canvas');
+    c.width = 1024; c.height = 256;
+    const g = c.getContext('2d');
+    const rnd = Terra.mulberry32((planet.hash ^ 0x51ed270b) >>> 0);
+    const cover = clamp((climate.stats && climate.stats.cloudCover) || 0.3, 0.12, 0.6);
+    const clusters = Math.round(10 + cover * 30);
+    for (let i = 0; i < clusters; i++) {
+      const cx = rnd() * 1024, cy = 70 + rnd() * 140, w = 60 + rnd() * 140;
+      for (let j = 0; j < 9; j++) {
+        const px = cx + (rnd() - 0.5) * w, py = cy + (rnd() - 0.5) * w * 0.22;
+        const r = (18 + rnd() * 34) * (0.6 + 0.4 * (cy / 210));
+        for (let wrap = -1; wrap <= 1; wrap++) {
+          const gx = px + wrap * 1024;
+          const gr = g.createRadialGradient(gx, py, 0, gx, py, r);
+          gr.addColorStop(0, 'rgba(255,255,255,0.55)');
+          gr.addColorStop(0.6, 'rgba(250,252,255,0.25)');
+          gr.addColorStop(1, 'rgba(250,252,255,0)');
+          g.fillStyle = gr;
+          g.fillRect(gx - r, py - r, r * 2, r * 2);
+        }
+      }
+    }
+    v.clouds = c; v.cloudsFor = planet;
+    return c;
+  }
+
+  function enterWalk() {
+    const firstTime = !landing.pl;
+    build3D();
+    if (firstTime) {
+      // Step out beside the ship, with the ship just left of centre.
+      const x = clamp(landing.ship.x + 4, 2, LG - 3), y = clamp(landing.ship.y + 9, 2, LG - 3);
+      const gz = ground3(x, y);
+      const a = Math.atan2(landing.ship.y - y, landing.ship.x - x) + 0.35;
+      landing.pl = { x, y, a, pitch: 0.04, z: gz, vz: 0, cam: gz + EYE3, onGround: true };
+    }
+    setLandView('3d');
+    if (firstTime) toast('On foot. Arrows to walk, F to flood, M for the map');
+  }
+
+  function render3D(now, dt) {
+    const P = landing.pl, ks = landing.keys;
+    // --- movement -----------------------------------------------------------
+    const run = ks.has('shift') ? 2.3 : 1;
+    P.a += ((ks.has('arrowright') ? 1 : 0) - (ks.has('arrowleft') ? 1 : 0)) * 1.9 * dt;
+    const fwd = (ks.has('arrowup') || ks.has('w') ? 1 : 0) - (ks.has('arrowdown') || ks.has('s') ? 1 : 0);
+    const str = (ks.has('d') ? 1 : 0) - (ks.has('a') ? 1 : 0);
+    const ca = Math.cos(P.a), sa = Math.sin(P.a);
+    const sp = 8 * run * dt;
+    P.x += (ca * fwd - sa * str) * sp;
+    P.y += (sa * fwd + ca * str) * sp;
+    const gz = ground3(P.x, P.y);
+    if (ks.has(' ') && P.onGround) { P.vz = 7; P.onGround = false; }
+    P.vz -= 20 * dt;
+    P.z += P.vz * dt;
+    if (P.z <= gz) { P.z = gz; P.vz = 0; P.onGround = true; }
+    const bob = P.onGround && (fwd || str) ? Math.sin(now / (run > 1 ? 90 : 130)) * 0.05 : 0;
+    P.cam = mix(P.cam, P.z + EYE3 + bob, 1 - Math.exp(-14 * dt));
+
+    // --- sky ----------------------------------------------------------------
+    const cv = landing.cvs, g = landing.ctx, CW = cv.width, CH = cv.height;
+    const RH = clamp(Math.round(W3 * CH / Math.max(1, CW)), 150, 1000);
+    const v = ensure3D(RH);
+    const sky = skyColors(), hz = sky.horizon, zn = sky.zenith, md = sky.mid;
+    const hor = RH * (0.5 + P.pitch);
+    const sxs = CW / W3, sys = CH / RH;
+    const focal = (W3 / 2) / TANH3;
+    g.setTransform(1, 0, 0, 1, 0, 0);
+    g.globalCompositeOperation = 'source-over';
+    const skyTop = (hor - 1.2 * focal) * sys, skyHor = hor * sys;
+    const grad = g.createLinearGradient(0, skyTop, 0, skyHor);
+    grad.addColorStop(0, 'rgb(' + zn + ')');
+    grad.addColorStop(0.55, 'rgb(' + md + ')');
+    grad.addColorStop(1, 'rgb(' + hz + ')');
+    g.fillStyle = grad;
+    g.fillRect(0, 0, CW, CH);
+
+    let da = SUN3.az - P.a;
+    da = Math.atan2(Math.sin(da), Math.cos(da));
+    const sunVisible = Math.abs(da) < 1.25;
+    const sunX = (W3 / 2 + Math.tan(clamp(da, -1.4, 1.4)) * focal) * sxs;
+    const sunY = (hor - Math.tan(0.42) * focal) * sys;
+    if (sunVisible) {
+      // Wide warm bloom, then the bright core.
+      const R1 = 260 * sys;
+      const bloom = g.createRadialGradient(sunX, sunY, 0, sunX, sunY, R1);
+      bloom.addColorStop(0, 'rgba(255,244,214,0.55)');
+      bloom.addColorStop(0.25, 'rgba(255,236,200,0.18)');
+      bloom.addColorStop(1, 'rgba(255,230,190,0)');
+      g.fillStyle = bloom;
+      g.fillRect(sunX - R1, sunY - R1, R1 * 2, R1 * 2);
+      const R2 = 16 * sys;
+      const core = g.createRadialGradient(sunX, sunY, 0, sunX, sunY, R2);
+      core.addColorStop(0, 'rgba(255,255,248,1)');
+      core.addColorStop(0.7, 'rgba(255,252,236,0.95)');
+      core.addColorStop(1, 'rgba(255,248,230,0)');
+      g.fillStyle = core;
+      g.fillRect(sunX - R2, sunY - R2, R2 * 2, R2 * 2);
+    }
+    // Clouds drift slowly and turn with you.
+    const strip = cloudStrip();
+    const stripH = 0.55 * focal * sys, stripY = (hor - 0.62 * focal) * sys, stripW = stripH * 4;
+    let off = -(((P.a / (Math.PI * 2)) * stripW * 2 + now * 0.004 * sys) % stripW);
+    if (off > 0) off -= stripW;
+    g.globalAlpha = 0.85;
+    for (let x = off; x < CW; x += stripW) g.drawImage(strip, x, stripY, stripW, stripH);
+    g.globalAlpha = 1;
+
+    // --- terrain (voxel space, front to back) --------------------------------
+    const tRender = performance.now();
+    const px = v.px, ybuf = v.ybuf, hw = v.hw, cr = v.cr, cgc = v.cg, cbc = v.cb, wet = v.wet, dep = v.depth;
+    px.fill(0);
+    ybuf.fill(RH);
+    const cam = P.cam, rx = -sa, ry = ca, tt = now / 1000;
+    if (!v.glint || v.glint.length !== W3) v.glint = new Float32Array(W3);
+    for (let i = 0; i < W3; i++) {
+      let d = SUN3.az - (P.a + Math.atan((i - W3 / 2) / focal));
+      d = Math.atan2(Math.sin(d), Math.cos(d));
+      v.glint[i] = Math.exp(-(d * d) / 0.018);
+    }
+    const glint = v.glint;
+    const FOGK = 0.011, fogNorm = 1 / (1 - Math.exp(-FAR3 * FOGK));
+    let z = 0.3, dz = 0.02;
+    while (z < FAR3) {
+      const lx = P.x + (ca - rx * TANH3) * z, ly = P.y + (sa - ry * TANH3) * z;
+      const ddx = (rx * TANH3 * 2 * z) / W3, ddy = (ry * TANH3 * 2 * z) / W3;
+      const inv = focal / z;
+      const fog = Math.min(1, (1 - Math.exp(-z * FOGK)) * fogNorm);
+      const refl = 0.16 + 0.58 * (1 - 1 / (1 + z * 0.05));
+      const near = z < 14;
+      let sx = lx, sy = ly;
+      for (let i = 0; i < W3; i++, sx += ddx, sy += ddy) {
+        const yb = ybuf[i];
+        if (yb <= 0) continue;
+        const mx = mirror3(sx), my = mirror3(sy);
+        const x0 = mx | 0, y0 = my | 0, fx = mx - x0, fy = my - y0;
+        const x1 = x0 < LG - 1 ? x0 + 1 : x0, y1 = y0 < LG - 1 ? y0 + 1 : y0;
+        const a = y0 * LG + x0, b = y0 * LG + x1, c = y1 * LG + x0, d = y1 * LG + x1;
+        const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+        const h = hw[a] * w00 + hw[b] * w10 + hw[c] * w01 + hw[d] * w11;
+        let top = (hor + (cam - h) * inv) | 0;
+        if (top >= yb) continue;
+        if (top < 0) top = 0;
+        let R = cr[a] * w00 + cr[b] * w10 + cr[c] * w01 + cr[d] * w11;
+        let G = cgc[a] * w00 + cgc[b] * w10 + cgc[c] * w01 + cgc[d] * w11;
+        let Bc = cbc[a] * w00 + cbc[b] * w10 + cbc[c] * w01 + cbc[d] * w11;
+        const wt = wet[a] * w00 + wet[b] * w10 + wet[c] * w01 + wet[d] * w11;
+        if (wt > 0.02) {
+          // Water: clear and turquoise in the shallows, deep blue offshore,
+          // reflecting the sky more at a distance, with ripples, a sun glint and shore foam.
+          const dp = dep[a] * w00 + dep[b] * w10 + dep[c] * w01 + dep[d] * w11;
+          const deepK = 1 - Math.exp(-dp * 0.9);
+          let wr = mix(62, 10, deepK), wg = mix(170, 52, deepK), wb = mix(178, 90, deepK);
+          const clear = Math.exp(-dp * 2.4) * 0.7;
+          wr = mix(wr, R, clear); wg = mix(wg, G, clear); wb = mix(wb, Bc, clear);
+          const rip = Math.sin(sx * 2.3 + tt * 1.8) * Math.sin(sy * 1.9 - tt * 1.4) +
+            0.5 * Math.sin(sx * 5.1 - tt * 2.6 + sy * 3.7);
+          wr = mix(wr, hz[0], refl); wg = mix(wg, hz[1], refl); wb = mix(wb, hz[2], refl);
+          const lum = 1 + 0.06 * rip;
+          wr *= lum; wg *= lum; wb *= lum;
+          if (z > 2) {
+            const sp2 = glint[i] * Math.max(0, rip) * (0.35 + refl);
+            wr += 255 * sp2; wg += 245 * sp2; wb += 220 * sp2;
+          }
+          if (dp < 0.07) {
+            const foam = (1 - dp / 0.07) * (0.45 + 0.25 * Math.sin(tt * 2.2 + sx * 3 + sy * 2));
+            wr = mix(wr, 245, foam); wg = mix(wg, 248, foam); wb = mix(wb, 250, foam);
+          }
+          const k = wt >= 0.5 ? 1 : wt * 2;
+          R = mix(R, wr, k); G = mix(G, wg, k); Bc = mix(Bc, wb, k);
+        } else if (near) {
+          const n = 0.97 + 0.06 * hash01(sx * 3, sy * 3);
+          R *= n; G *= n; Bc *= n;
+        }
+        if (fog > 0) { R = mix(R, hz[0], fog); G = mix(G, hz[1], fog); Bc = mix(Bc, hz[2], fog); }
+        const col = 0xff000000 | ((Bc > 255 ? 255 : Bc) << 16) | ((G > 255 ? 255 : G) << 8) | (R > 255 ? 255 : R);
+        for (let y = top, o = top * W3 + i; y < yb; y++, o += W3) px[o] = col;
+        ybuf[i] = top;
+      }
+      z += dz;
+      dz = 0.02 + z * 0.011;
+    }
+    v.octx.putImageData(v.img, 0, 0);
+    v.ema = v.ema * 0.85 + (performance.now() - tRender) * 0.15;
+    if (++v.frames % 20 === 0) {
+      const maxW = Math.min(1280, CW);
+      if (v.ema > 20 && W3 > 360) W3 = Math.round(W3 * 0.85 / 2) * 2;
+      else if (v.ema < 10 && W3 < maxW) W3 = Math.min(maxW, Math.round(W3 * 1.1 / 2) * 2);
+    }
+    g.imageSmoothingEnabled = true;
+    g.imageSmoothingQuality = 'high';
+    g.drawImage(v.off, 0, 0, W3, RH, 0, 0, CW, CH);
+
+    // Light haze over the horizon line and a soft sun glow over the land.
+    const haze = g.createLinearGradient(0, skyHor - 40 * sys, 0, skyHor + 24 * sys);
+    haze.addColorStop(0, 'rgba(' + hz + ',0)');
+    haze.addColorStop(0.6, 'rgba(' + hz + ',0.35)');
+    haze.addColorStop(1, 'rgba(' + hz + ',0)');
+    g.fillStyle = haze;
+    g.fillRect(0, skyHor - 40 * sys, CW, 64 * sys);
+    if (sunVisible) {
+      g.globalCompositeOperation = 'lighter';
+      const R3 = 180 * sys;
+      const glow = g.createRadialGradient(sunX, sunY, 0, sunX, sunY, R3);
+      glow.addColorStop(0, 'rgba(255,236,200,0.22)');
+      glow.addColorStop(1, 'rgba(255,236,200,0)');
+      g.fillStyle = glow;
+      g.fillRect(sunX - R3, sunY - R3, R3 * 2, R3 * 2);
+      g.globalCompositeOperation = 'source-over';
+    }
+    // Vignette.
+    const vg = g.createRadialGradient(CW / 2, CH / 2, Math.min(CW, CH) * 0.35, CW / 2, CH / 2, Math.hypot(CW, CH) * 0.62);
+    vg.addColorStop(0, 'rgba(0,0,0,0)');
+    vg.addColorStop(1, 'rgba(0,0,10,0.38)');
+    g.fillStyle = vg;
+    g.fillRect(0, 0, CW, CH);
+
+    // Crosshair marks where tools 1-5 will act.
+    g.strokeStyle = 'rgba(255,255,255,0.7)';
+    g.lineWidth = Math.max(1, sys);
+    const cx = CW / 2, cyy = CH / 2;
+    g.beginPath(); g.moveTo(cx - 7 * sys, cyy); g.lineTo(cx + 7 * sys, cyy); g.moveTo(cx, cyy - 7 * sys); g.lineTo(cx, cyy + 7 * sys); g.stroke();
+
+    // Read-out: ground under your feet.
+    const ci = clamp(mirror3(P.y) | 0, 0, LG - 1) * LG + clamp(mirror3(P.x) | 0, 0, LG - 1);
+    const bio = Terra.BIOMES[landing.biome[ci]];
+    const em = Math.round(heightAboveSea(ci)), T = Math.round(landing.tNow[ci]);
+    const dSea = Math.round((landing.sl - landing.sl0) * 8000);
+    const label = 'On foot: ' + (v.wet[ci] > 0.5 ? 'wading in ' : '') + bio.name + ' · ' +
+      (em < 0 ? Math.abs(em).toLocaleString('en-US') + ' m deep' : em.toLocaleString('en-US') + ' m') + ' · ' +
+      (T > 0 ? '+' : T < 0 ? '−' : '') + Math.abs(T) + ' °C' + (dSea ? ' · sea ' + (dSea > 0 ? '+' : '−') + Math.abs(dSea).toLocaleString('en-US') + ' m' : '');
+    if (landing.readEl.textContent !== label) landing.readEl.textContent = label;
+  }
+
+  /** Point a few steps ahead of the walker, in local map cells. */
+  function aheadCell() {
+    const P = landing.pl;
+    return { x: mirror3(P.x + Math.cos(P.a) * 6), y: mirror3(P.y + Math.sin(P.a) * 6) };
+  }
+
+  function shiftSea(dir) {
+    const r = landing.range;
+    landing.sl = clamp(landing.sl + dir * 0.0025 * r, climate.hmin, climate.hmax);
+    recolorLanding();
+  }
+
+  function setLandView(view) {
+    landing.view = view;
+    const is3d = view === '3d';
+    landing.root.classList.toggle('walking', is3d);
+    if (landing.viewBtn) landing.viewBtn.textContent = is3d ? 'Map and tools (M)' : 'Walk around (M)';
+    if (landing.hintEl) {
+      landing.hintEl.textContent = is3d
+        ? 'Arrows walk and turn · A/D strafe · Shift run · Space jump · drag to look · F/G raise or lower the sea · 1–5 use a tool at the crosshair'
+        : 'WASD or arrow keys fly the ship · click or drag to use a tool · 1–5 pick a tool · F/G raise or lower the sea';
+    }
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    landing.look = null;
+    sizeLanding();
+  }
+
+  /** Height in metres above the current local sea level (negative = depth). */
+  function heightAboveSea(k) {
+    const d = landing.h[k] - landing.sl;
+    return d >= 0 ? 11000 * d * Math.sqrt(d) : d * 8000;
+  }
+
+  function landKey(e) {
+    const k = String(e.key).toLowerCase();
+    if (k === 'escape') { e.preventDefault(); closeLanding(); return; }
+    if (k === 'm') { e.preventDefault(); if (landing.view === '3d') setLandView('map'); else enterWalk(); return; }
+    if (k === 'f' || k === 'g') { e.preventDefault(); shiftSea(k === 'f' ? 1 : -1); return; }
+    if (k >= '1' && k <= '5') {
+      e.preventDefault();
+      setLandTool(LD_TOOLS[Number(k) - 1].id);
+      if (landing.view === '3d' && landing.pl) { const c = aheadCell(); applyLandTool(c.x, c.y, !e.repeat); }
+      return;
+    }
+    if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'shift', ' '].indexOf(k) >= 0) {
+      e.preventDefault();
+      landing.keys.add(k);
+    }
+  }
+
+  function drawShip(g, x, y, s, flame, t) {
+    g.save();
+    g.translate(x, y);
+    g.scale(s, s);
+    if (flame > 0.02) {
+      const len = 22 * flame * (0.85 + 0.15 * Math.sin(t * 40));
+      const fl = g.createLinearGradient(0, 4, 0, 4 + len);
+      fl.addColorStop(0, 'rgba(255,240,180,0.95)');
+      fl.addColorStop(1, 'rgba(255,120,40,0)');
+      g.fillStyle = fl;
+      g.beginPath(); g.moveTo(-4, 4); g.lineTo(0, 4 + len); g.lineTo(4, 4); g.closePath(); g.fill();
+    }
+    g.strokeStyle = '#cfd8f5'; g.lineWidth = 1.6; g.lineCap = 'round';
+    g.beginPath();
+    g.moveTo(-6, 2); g.lineTo(-11, 10); g.moveTo(6, 2); g.lineTo(11, 10);
+    g.moveTo(-13.5, 10); g.lineTo(-8.5, 10); g.moveTo(8.5, 10); g.lineTo(13.5, 10);
+    g.stroke();
+    const body = g.createLinearGradient(0, -14, 0, 6);
+    body.addColorStop(0, '#f4f7ff'); body.addColorStop(1, '#8792b8');
+    g.fillStyle = body;
+    g.beginPath(); g.moveTo(0, -14); g.quadraticCurveTo(10, -7, 9, 4); g.lineTo(-9, 4); g.quadraticCurveTo(-10, -7, 0, -14); g.closePath(); g.fill();
+    g.fillStyle = '#6ee7ff';
+    g.beginPath(); g.arc(0, -5, 3, 0, Math.PI * 2); g.fill();
+    g.restore();
+  }
+
+  function landFrame(now) {
+    if (!landing.open) return;
+    const dt = landing.last ? Math.min(0.05, (now - landing.last) / 1000) : 0;
+    landing.last = now;
+    if (landing.view === '3d' && landing.pl) {
+      render3D(now, dt);
+      landing.raf = requestAnimationFrame(landFrame);
+      return;
+    }
+    const t = (now - landing.t0) / 1000;
+    const descent = 1.8;
+    const landed = t >= descent;
+    if (!landing.walked && t > descent + 0.9) {
+      landing.walked = true;
+      enterWalk();
+      landing.raf = requestAnimationFrame(landFrame);
+      return;
+    }
+    const ks = landing.keys;
+    const ax = (ks.has('d') || ks.has('arrowright') ? 1 : 0) - (ks.has('a') || ks.has('arrowleft') ? 1 : 0);
+    const ay = (ks.has('s') || ks.has('arrowdown') ? 1 : 0) - (ks.has('w') || ks.has('arrowup') ? 1 : 0);
+    const moving = landed && (ax || ay);
+    if (moving) {
+      const sp = 26 / Math.hypot(ax, ay);
+      landing.ship.x = clamp(landing.ship.x + ax * sp * dt, 2, LG - 2);
+      landing.ship.y = clamp(landing.ship.y + ay * sp * dt, 2, LG - 2);
+    }
+
+    const g = landing.ctx, d = landing.dpr || 1, S = landing.size, cell = S / LG;
+    g.setTransform(d, 0, 0, d, 0, 0);
+    g.imageSmoothingEnabled = false;
+    g.drawImage(landing.off, 0, 0, S, S);
+
+    // Bases: little domes with a blinking beacon.
+    landing.bases.forEach((b) => {
+      const bx = b.x * cell, by = b.y * cell, r = Math.max(5, cell * 2.4);
+      g.fillStyle = 'rgba(0,0,0,0.35)';
+      g.beginPath(); g.ellipse(bx, by + r * 0.15, r * 1.1, r * 0.35, 0, 0, Math.PI * 2); g.fill();
+      g.fillStyle = '#e8eefc';
+      g.beginPath(); g.arc(bx, by, r, Math.PI, 0); g.closePath(); g.fill();
+      g.fillStyle = 'rgba(110,231,255,0.9)';
+      g.fillRect(bx - r * 0.45, by - r * 0.35, r * 0.9, r * 0.18);
+      const blink = 0.5 + 0.5 * Math.sin((now - b.t) / 260);
+      g.fillStyle = 'rgba(255,120,90,' + (0.4 + 0.6 * blink) + ')';
+      g.beginPath(); g.arc(bx, by - r - 2, 1.8, 0, Math.PI * 2); g.fill();
+    });
+
+    // Ship: descends with a burning engine, kicks up dust, then hovers.
+    const shipX = landing.ship.x * cell, shipY = landing.ship.y * cell;
+    const k = landed ? 1 : clamp(t / descent, 0, 1);
+    const alt = landed ? (moving ? 0.06 : 0.02 + 0.01 * Math.sin(t * 3)) : 1 - (1 - Math.pow(1 - k, 3));
+    const s = Math.max(0.8, S / 480) * (1 + alt * 1.6);
+    g.fillStyle = 'rgba(0,0,0,' + (0.35 * (1 - alt * 0.6)) + ')';
+    g.beginPath(); g.ellipse(shipX, shipY + 10, 12 * (1 - alt * 0.4) * Math.max(0.8, S / 480), 4 * Math.max(0.8, S / 480), 0, 0, Math.PI * 2); g.fill();
+    if (t > descent - 0.2 && t < descent + 0.9) {
+      const q = clamp((t - (descent - 0.2)) / 1.1, 0, 1);
+      g.strokeStyle = 'rgba(230,220,200,' + (0.55 * (1 - q)) + ')';
+      g.lineWidth = 3;
+      g.beginPath(); g.ellipse(shipX, shipY + 10, 10 + q * 60, 3 + q * 18, 0, 0, Math.PI * 2); g.stroke();
+    }
+    drawShip(g, shipX, shipY - alt * S * 0.35, s, landed ? (moving ? 0.5 : 0) : 1, t);
+
+    // Brush preview under the cursor.
+    const p = landing.pointer;
+    if (p && landing.tool !== 'base') {
+      g.strokeStyle = 'rgba(255,255,255,0.65)';
+      g.lineWidth = 1.2;
+      g.beginPath(); g.arc(p.x * cell, p.y * cell, 6 * cell, 0, Math.PI * 2); g.stroke();
+    }
+
+    // Read-out: what is under the cursor, or under the ship.
+    const fx = p ? p.x : landing.ship.x, fy = p ? p.y : landing.ship.y;
+    const ci = clamp(fy | 0, 0, LG - 1) * LG + clamp(fx | 0, 0, LG - 1);
+    const b = Terra.BIOMES[landing.biome[ci]];
+    const em = Math.round(heightAboveSea(ci)), T = Math.round(landing.tNow[ci]);
+    const label = (p ? 'Cursor' : (landed ? 'Ship' : 'Descending')) + ': ' + b.name + ' · ' +
+      (em < 0 ? Math.abs(em).toLocaleString('en-US') + ' m deep' : em.toLocaleString('en-US') + ' m') + ' · ' +
+      (T > 0 ? '+' : T < 0 ? '−' : '') + Math.abs(T) + ' °C · ' + landing.bases.length + ' base' + (landing.bases.length === 1 ? '' : 's');
+    if (landing.readEl.textContent !== label) landing.readEl.textContent = label;
+
+    landing.raf = requestAnimationFrame(landFrame);
+  }
+
   window.addEventListener('keydown', (e) => {
     if (!dom.helpModal.hidden) {
       if (e.key === 'Escape') { e.preventDefault(); closeHelp(); }
@@ -1817,6 +2744,8 @@
       else if (gk === 'Enter' && (game.state === 'intro' || game.state === 'over') && !(e.target && e.target.tagName === 'BUTTON')) { e.preventDefault(); startGame(); }
       return;
     }
+    if (landing.open) { landKey(e); return; }
+    if (e.key === 'Escape' && landing.pickMode) { setLandPick(false); return; }
     if (e.key === 'Escape') {
       if (document.body.classList.contains('photo')) setPhoto(false);
       if (document.activeElement === dom.seed) { dom.seed.value = state.seed; dom.seed.blur(); refreshSeedStatus(); }
@@ -1844,6 +2773,7 @@
     else if (k === 'k' || k === 'K') startDoom();
     else if (k === 'd' || k === 'D') openGame();
     else if (k === 'x' || k === 'X') resetSliders();
+    else if (k === 'e' || k === 'E') landCommand(true);
     else if (k === 's' || k === 'S') share();
     else if (k === 'p' || k === 'P') savePostcard();
     else if ((k === '+' || k === '=') && state.view === 'globe') setZoom(view.targetZoom * 1.2);
@@ -2743,6 +3673,7 @@
   dom.play.addEventListener('click', togglePlay);
   dom.zoomIn.addEventListener('click', () => { setZoom(view.targetZoom * 1.25); markInteracted(); sfx('click'); });
   dom.zoomOut.addEventListener('click', () => { setZoom(view.targetZoom / 1.25); markInteracted(); sfx('click'); });
+  document.getElementById('btn-land').addEventListener('click', () => { landCommand(false); markInteracted(); });
   dom.reset.addEventListener('click', () => { resetView(); markInteracted(); sfx('click'); });
 
   // Sound: browsers only allow audio after a user gesture, so unlock on the first one.
