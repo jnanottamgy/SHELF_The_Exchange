@@ -1329,7 +1329,7 @@
       g.fillStyle = '#626c95';
       g.font = '500 18px ' + font;
       const seedLabel = planet.seed.length > 40 ? planet.seed.slice(0, 40) + '…' : planet.seed;
-      g.fillText('Seed “' + seedLabel + '” · ' + (st.className ? 'Tiny Terra' : ''), x, 830);
+      g.fillText('Seed “' + seedLabel + '” · Tiny Terra', x, 830);
 
       const filename = 'tiny-terra-' + planet.name.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '.png';
       const finish = (url, revoke) => {
