@@ -652,16 +652,18 @@
           // Heights are measured from the datum (sea level, or the median
           // ground on dry worlds) and curved so lowlands stay low.
           const dr = e - lapseRef;
-          em = dr >= 0 ? LAND_SCALE * dr * Math.sqrt(dr) : -LAND_SCALE * -dr * Math.sqrt(-dr);
-          T = Tsea - (dr > 0 ? (LAPSE * em) / 1000 : 0);
+          const emRel = dr >= 0 ? LAND_SCALE * dr * Math.sqrt(dr) : -LAND_SCALE * -dr * Math.sqrt(-dr);
+          T = Tsea - (dr > 0 ? (LAPSE * emRel) / 1000 : 0);
           const ds = e - sl;
           const aboveSea = LAND_SCALE * ds * Math.sqrt(ds);
+          // Shown heights are above sea level; with no ocean at all, above the median ground.
+          em = wf > 0 ? aboveSea : emRel;
           let me = 0.62 * (moist[i] * 1.25 + 0.5) + 0.38 * moistLat + (wf - 0.55) * 0.35 - Math.max(0, T - 24) * 0.022;
           me = clamp(me, 0, 1);
           if (T > 52) b = BIOME.SCORCHED;
+          else if (emRel > 3200) b = T < -14 ? BIOME.SNOW : BIOME.MOUNTAIN;
           else if (T < -18) b = BIOME.ICE;
           else if (T < -5) b = BIOME.SNOW;
-          else if (em > 4300 && T < 30) b = BIOME.MOUNTAIN;
           else if (aboveSea < 30 && wf > 0 && T > 1) b = BIOME.BEACH;
           else if (T < 3) b = BIOME.TUNDRA;
           else if (T < 9) b = me > 0.45 ? BIOME.TAIGA : BIOME.TUNDRA;
@@ -675,7 +677,7 @@
             r = lerp(r, hotDesert[0], k); g = lerp(g, hotDesert[1], k); bl = lerp(bl, hotDesert[2], k);
           }
           if (b !== BIOME.SNOW && b !== BIOME.ICE && b !== BIOME.SCORCHED) {
-            const k = smoothstep(1800, 4600, em) * 0.85;
+            const k = smoothstep(1800, 4600, emRel) * 0.85;
             r = lerp(r, rock[0], k); g = lerp(g, rock[1], k); bl = lerp(bl, rock[2], k);
           }
           const sh = shade[i] * v;
@@ -817,9 +819,9 @@
     else if (Wf >= 0.78) cls = 'Archipelago World';
     else if (Wf <= 0.15) cls = land(BIOME.DESERT) + land(BIOME.SCORCHED) + land(BIOME.SAVANNA) * 0.5 > 0.35 ? 'Desert World' : 'Dry World';
     else if (land(BIOME.DESERT) + land(BIOME.SAVANNA) * 0.5 > 0.45) cls = 'Arid World';
+    else if (land(BIOME.MOUNTAIN) > 0.08) cls = 'Highland World';
     else if (land(BIOME.RAINFOREST) > 0.3 && land(BIOME.RAINFOREST) + land(BIOME.FOREST) > 0.5) cls = 'Jungle World';
     else if (land(BIOME.FOREST) + land(BIOME.TAIGA) > 0.5) cls = 'Forest World';
-    else if (land(BIOME.MOUNTAIN) > 0.25) cls = 'Highland World';
     else if (land(BIOME.TUNDRA) + land(BIOME.TAIGA) + land(BIOME.SNOW) + land(BIOME.ICE) > 0.5) cls = 'Boreal World';
     else if (Wf < 0.15) cls = 'Dry World';
     else cls = 'Temperate World';
@@ -827,7 +829,8 @@
     const pct = (x) => Math.round(x * 100) + '%';
     const notes = [];
     // 1. What dominates the surface.
-    if (Wf >= 0.97) notes.push('Endless ocean wraps the globe; there is no dry land to stand on.');
+    if (!st.hasLand) notes.push('Endless ocean wraps the globe; there is no dry land to stand on.');
+    else if (Wf >= 0.97) notes.push('Oceans cover ' + pct(Wf) + ' of the surface; only a few tiny islands break the waves.');
     else if (Wf >= 0.78) notes.push('Oceans cover ' + pct(Wf) + ' of the surface, broken by scattered islands.');
     else if (Wf <= 0.005) notes.push('Not a single ocean: the whole surface is dry ground.');
     else if (Wf <= 0.15) notes.push('Water is scarce: seas cover only ' + pct(Wf) + ' of the surface.');

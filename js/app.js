@@ -1075,7 +1075,7 @@
       }
       return;
     }
-    if (e.pointerType === 'mouse') hover = { x: e.clientX, y: e.clientY };
+    if (e.pointerType === 'mouse') { hover = { x: e.clientX, y: e.clientY }; dirty = true; }
   });
 
   function endPointer(e) {
