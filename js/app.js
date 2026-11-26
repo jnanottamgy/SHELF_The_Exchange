@@ -512,7 +512,7 @@
   function drawGlobe(introK, pulse) {
     const R = globeRadius() * (0.6 + 0.4 * introK) * pulse;
     const { cx, cy } = layout;
-    const N = clamp(Math.round(2 * R * dpr), 64, Math.round(qualityCap));
+    const N = clamp(Math.round((2 * R * dpr) / 16) * 16, 64, Math.round(qualityCap / 16) * 16);
     const buf = globeBuffer(N);
     const P = frameParams();
     const t0 = performance.now();
@@ -542,7 +542,11 @@
       gbuf.img = gbuf.ctx.createImageData(gbuf.size, gbuf.size);
       gbuf.n = 0;
     }
-    if (gbuf.n !== N) { gbuf.img.data.fill(0); gbuf.n = N; }
+    if (gbuf.n !== N) {
+      const d = gbuf.img.data, rowBytes = gbuf.size * 4, used = Math.max(N, gbuf.n);
+      for (let y = 0; y < used; y++) d.fill(0, y * rowBytes, y * rowBytes + used * 4);
+      gbuf.n = N;
+    }
     return gbuf;
   }
 

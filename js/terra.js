@@ -255,7 +255,7 @@
     const lim = LIMITS[key];
     let n = NaN;
     if (typeof value === 'number') n = value;
-    else if (typeof value === 'string' && value.trim() !== '') n = Number(value.trim());
+    else if (typeof value === 'string' && /^[+-]?\d{1,6}(\.\d{1,6})?$/.test(value.trim())) n = Number(value.trim());
     if (!Number.isFinite(n)) return lim.def;
     return clamp(Math.round(n), lim.min, lim.max);
   }
