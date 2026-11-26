@@ -174,7 +174,7 @@
     const c = dom.canvas.getBoundingClientRect();
     const s = dom.stage.getBoundingClientRect();
     const short = window.innerHeight <= 960 && window.innerWidth > 980;
-    const top = short ? 44 : 52, bottom = short ? 56 : 70; // room for the view switch and the HUD
+    const top = short ? 92 : 104, bottom = short ? 56 : 70; // room for the view switch, mission and HUD
     const stageW = Math.max(120, s.width), stageH = Math.max(120, s.height);
     const availH = Math.max(100, stageH - top - bottom);
     const cx = s.left - c.left + stageW / 2;
@@ -661,6 +661,7 @@
     climateDirty = false;
     if (first) introStart = reduceMotion ? -1 : performance.now();
     updateIdentity();
+    pickMission();
     updateCard(true);
     if (audio) audio.planet(planet.hash, state.temp, state.water);
     if (!first) sfx('planet');
@@ -797,6 +798,59 @@
       st.habitability + ' of 100.');
     lastStatsAt = performance.now();
     statsDirty = false;
+    updateMission();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Missions: each planet gets one challenge, picked from its seed.
+  // ---------------------------------------------------------------------------
+  const B = Terra.BIOME;
+  const MISSIONS = [
+    { text: 'Make it a Paradise: habitability 85+', p: (s) => s.habitability / 85 },
+    { text: 'Freeze a third of the surface', p: (s) => s.iceFrac / 0.33 },
+    { text: 'Turn 40% of it into desert', p: (s) => (s.frac[B.DESERT] + s.frac[B.SCORCHED]) / 0.4 },
+    { text: 'Drown it: 90% ocean', p: (s) => s.waterFrac / 0.9 },
+    { text: 'Grow rainforest over 5% of the planet', p: (s) => s.frac[B.RAINFOREST] / 0.05 },
+    { text: 'Heat it to a +40 °C surface average', p: (s) => (s.avgTemp + 30) / 70 },
+    { text: 'Raise mountains over 5% of the planet', p: (s) => s.frac[B.MOUNTAIN] / 0.05 },
+    { text: 'Light up the night: grow a civilization', p: (s) => (s.civilization ? 1 : Math.min(0.95, s.habitability / 35)) },
+  ];
+  let mission = null;
+  const missionEl = $('mission'), missionText = $('mission-text'), missionPct = $('mission-pct'),
+    missionFill = $('mission-fill'), missionLabel = $('mission-label');
+
+  function pickMission() {
+    const st = climate.stats;
+    const start = (planet.hash >>> 3) % MISSIONS.length;
+    let idx = start;
+    for (let k = 0; k < MISSIONS.length; k++) {
+      const i = (start + k) % MISSIONS.length;
+      if (MISSIONS[i].p(st) < 0.9) { idx = i; break; } // skip ones already (nearly) done
+    }
+    mission = { idx, done: false };
+    missionEl.classList.remove('done', 'celebrate');
+    missionLabel.textContent = 'Mission';
+    missionText.textContent = MISSIONS[idx].text;
+    missionEl.title = MISSIONS[idx].text;
+  }
+
+  function updateMission() {
+    if (!mission || !climate) return;
+    const raw = MISSIONS[mission.idx].p(climate.stats);
+    const p = clamp(Number.isFinite(raw) ? raw : 0, 0, 1);
+    const shown = mission.done ? 1 : p;
+    missionFill.style.width = (shown * 100).toFixed(1) + '%';
+    missionPct.textContent = Math.floor(shown * 100) + '%';
+    if (!mission.done && p >= 1) {
+      mission.done = true;
+      missionEl.classList.add('done');
+      missionLabel.textContent = 'Complete ★';
+      missionEl.classList.remove('celebrate');
+      void missionEl.offsetWidth;
+      missionEl.classList.add('celebrate');
+      sfx('chime');
+      toast('Mission complete! Roll a new planet (R) for a new challenge.', 3200);
+    }
   }
 
   // ---------------------------------------------------------------------------

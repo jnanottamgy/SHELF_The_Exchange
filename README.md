@@ -15,6 +15,7 @@
 - Explore it as a rotating globe or a flat map. Sunlight sweeps across the planet in a day-night cycle, and city lights or lava glow on the night side.
 - Temperature, water level and terrain sliders reshape the planet live. A hot world spreads into deserts and a cold one freezes over. A climate time-lapse shows the ice caps advancing and retreating.
 - Each planet gets an ID card with a generated name, world type, habitability score and an explorer's log. Planets can be saved as postcards.
+- Every planet comes with a mission picked from its seed (for example "Freeze a third of the surface" or "Make it a Paradise"). A progress bar fills as you move the sliders, and completing it earns a star and a chime.
 - Every planet also has its own sound: an ambient hum whose chord comes from the seed, an ocean swell that follows the water level, and gentle sound effects for every control (mute with the speaker button or `A`).
 
 ![Tiny Terra showing a ringed Earth-like planet](docs/preview.jpg)
