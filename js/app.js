@@ -2737,6 +2737,11 @@
     }
     if (game) {
       const gk = e.key;
+      if (game.state === 'upgrade') {
+        if (gk >= '1' && gk <= '3' && game.upgradeOptions[Number(gk) - 1]) { e.preventDefault(); pickSkill(game.upgradeOptions[Number(gk) - 1].id); }
+        else if (gk === 'a' || gk === 'A') toggleSound();
+        return;
+      }
       if (gk === 'Escape') { e.preventDefault(); if (game.state === 'playing') togglePause(); else exitGame(); }
       else if (gk === ' ' || gk === 'Spacebar') {
         if (game.state === 'playing' || game.state === 'paused') { e.preventDefault(); togglePause(); }
@@ -3074,7 +3079,8 @@
 
   function newGameState(st, prevZoom) {
     return {
-      state: st, score: 0, lives: G_LIVES, wave: 0, combo: 0, comboT: 0,
+      state: st, score: 0, lives: G_LIVES, maxLives: G_LIVES, wave: 0, combo: 0, comboT: 0,
+      skills: { heavy: 0, wide: 0, chain: 0, turret: 0, slow: 0, shield: 0 }, turretT: 2, pendingUpgrade: false, upgradeOptions: [],
       meteors: [], parts: [], beams: [], texts: [], rings: [], craters: [],
       spawnLeft: 0, spawnT: 0, breakT: 0, beatT: 0.6, beatN: 0, powerT: rnd(12, 20),
       shots: 0, hits: 0, kills: 0, shake: 0, nova: 0, newBest: false, prevZoom: prevZoom || 1,
@@ -3082,7 +3088,8 @@
   }
 
   function openGame() {
-    if (game) return;
+    if (game || landing.open) return;
+    if (landing.pickMode) setLandPick(false);
     if (!planet || !climate || builder) { toast('Wait a moment, the planet is still forming'); return; }
     if (doom) rebuildPlanet(true);
     if (!dom.helpModal.hidden) closeHelp();
@@ -3165,10 +3172,12 @@
     gui.combo.textContent = '×' + comboMult();
     gui.best.textContent = Math.max(bestScore, game.score).toLocaleString('en-US');
     gui.lives.querySelectorAll('.life').forEach((el, i) => {
+      el.classList.toggle('slot-off', i >= game.maxLives);
       el.classList.toggle('on', i < game.lives);
       el.classList.toggle('lost', i >= game.lives);
     });
-    gui.lives.setAttribute('aria-label', game.lives + ' of ' + G_LIVES + ' shields left');
+    gui.lives.setAttribute('aria-label', game.lives + ' of ' + game.maxLives + ' shields left');
+    renderSkillChips(false);
     gui.root.classList.toggle('danger', game.lives === 1 && game.state === 'playing');
   }
 
@@ -3192,6 +3201,29 @@
       c.append(rules);
       actions.append(btn('Start', true, startGame), btn('Back to the lab', false, exitGame));
       c.append(actions, el('div', 'gc-foot', 'Best score ' + bestScore.toLocaleString('en-US') + ' · chain hits for up to ×8 · Space pauses'));
+    } else if (kind === 'upgrade') {
+      c.className = 'game-card show upgrade';
+      c.append(el('div', 'gc-eyebrow', 'Wave ' + game.wave + ' cleared'), title('Upgrade your guns'));
+      const list = el('div', 'gc-skills');
+      game.upgradeOptions.forEach((k, idx) => {
+        const lv = game.skills[k.id];
+        const b = el('button', 'g-skill');
+        b.type = 'button';
+        const ico = el('span', 'sk-ico', k.glyph); ico.style.background = k.col;
+        const body = el('span');
+        const nm = el('span', 'sk-name', k.name);
+        const ds = el('span', 'sk-desc', k.desc(lv)); ds.style.display = 'block';
+        body.append(nm, ds);
+        const lvl = el('span', 'sk-lvl', (lv ? ROMAN[lv] + ' → ' : 'New · ') + ROMAN[lv + 1]);
+        if (!coarse) { const kb = el('kbd', null, String(idx + 1)); lvl.appendChild(kb); }
+        b.append(ico, body, lvl);
+        b.addEventListener('click', () => pickSkill(k.id));
+        list.append(b);
+      });
+      c.append(list, el('div', 'gc-foot', 'Pick one to start wave ' + (game.wave + 1)));
+      const firstSkill = c.querySelector('.g-skill');
+      if (firstSkill && !coarse) setTimeout(() => { try { firstSkill.focus({ preventScroll: true }); } catch (e) { firstSkill.focus(); } }, 60);
+      return;
     } else if (kind === 'paused') {
       c.append(el('div', 'gc-eyebrow', 'Planet Defense'), title('Paused'),
         el('p', null, 'Wave ' + game.wave + ' · score ' + game.score.toLocaleString('en-US') + '. The meteors will wait.'));
@@ -3255,7 +3287,7 @@
 
   function spawnPower() {
     const far = farRadius();
-    const kind = game.lives < G_LIVES && Math.random() < 0.65 ? 'repair' : 'nova';
+    const kind = game.lives < game.maxLives && Math.random() < 0.65 ? 'repair' : 'nova';
     const a = rnd(0, Math.PI * 2), b = a + Math.PI + rnd(-0.5, 0.5);
     game.meteors.push({ kind, power: true, sx: Math.cos(a) * far, sy: Math.sin(a) * far, tx: Math.cos(b) * far, ty: Math.sin(b) * far,
       t: 0, dur: 8.5, size: 0.06, hp: 1, maxHp: 1, rot: 0, spin: 1.6, flash: 0 });
@@ -3278,7 +3310,7 @@
     let best = null, bd = Infinity;
     for (const m of game.meteors) {
       const p = meteorPos(m);
-      const reach = Math.max(p.r * 1.5, coarse ? 30 : 20);
+      const reach = Math.max(p.r * 1.5, coarse ? 30 : 20) * (1 + 0.35 * game.skills.wide);
       const d = Math.hypot(p.x - x, p.y - y);
       if (d < reach && d < bd) { bd = d; best = { m, p }; }
     }
@@ -3292,13 +3324,39 @@
     game.hits++;
     const { m, p } = best;
     if (m.power) { collectPower(m, p); return; }
-    m.hp--;
-    m.flash = 1;
-    if (m.hp > 0) { puff(p.x, p.y, '255,200,120', 9); sfx('clink'); return; }
-    destroyMeteor(m, p, true);
+    hitMeteor(m, p, 1 + game.skills.heavy);
   }
 
-  function destroyMeteor(m, p, scored) {
+  /** Damages a meteor; returns true if it was destroyed. */
+  function hitMeteor(m, p, dmg, chained) {
+    m.hp -= dmg;
+    m.flash = 1;
+    if (m.hp > 0) { puff(p.x, p.y, '255,200,120', 9); sfx('clink'); return false; }
+    destroyMeteor(m, p, true, chained);
+    return true;
+  }
+
+  /** Chain lightning: a kill arcs to the nearest meteors. */
+  function chainFrom(p, count) {
+    const R = Math.max(40, globeRadius());
+    const used = new Set();
+    let from = p;
+    for (let c = 0; c < count; c++) {
+      let best = null, bd = R * 2.4;
+      for (const m of game.meteors) {
+        if (m.power || used.has(m)) continue;
+        const q = meteorPos(m), d = Math.hypot(q.x - from.x, q.y - from.y);
+        if (d < bd) { bd = d; best = { m, q }; }
+      }
+      if (!best) break;
+      used.add(best.m);
+      game.beams.push({ x0: from.x, y0: from.y, x1: best.q.x, y1: best.q.y, age: 0, life: 0.22, arc: true });
+      hitMeteor(best.m, best.q, 1, true);
+      from = best.q;
+    }
+  }
+
+  function destroyMeteor(m, p, scored, chained) {
     const i = game.meteors.indexOf(m);
     if (i >= 0) game.meteors.splice(i, 1);
     const big = m.kind === 'big';
@@ -3317,6 +3375,7 @@
       gui.combo.classList.remove('pop'); void gui.combo.offsetWidth; gui.combo.classList.add('pop');
       if (mult >= 3) floatText(layout.cx, layout.cy - globeRadius() - 26, 'Combo ×' + mult + '!', '#d9b26f', 1.2);
     }
+    if (game.skills.chain > 0 && !chained) setTimeout(() => { if (game && game.state === 'playing') chainFrom(p, game.skills.chain); }, 70);
     if (big) {
       for (let s = 0; s < 2; s++) {
         const child = spawnMeteor('rock', [p.nx, p.ny, Math.max(1.6, (m.dur - m.t) * 0.9 + rnd(0.2, 0.8))]);
@@ -3331,7 +3390,7 @@
     if (i >= 0) game.meteors.splice(i, 1);
     game.score += 150 * comboMult();
     if (m.kind === 'repair') {
-      if (game.lives < G_LIVES) { game.lives++; game.craters.pop(); } // the newest crater heals over
+      if (game.lives < game.maxLives) { game.lives++; game.craters.pop(); } // the newest crater heals over
       floatText(p.x, p.y - 22, 'Shield repaired', '#a9e0bd', 1.1);
       explodeAt(p.x, p.y, p.r, '140,220,170', 1.2);
       sfx('power');
@@ -3399,6 +3458,81 @@
     renderGameHud();
   }
 
+  // --- gun upgrades ---------------------------------------------------------------
+  const SKILLS = [
+    { id: 'heavy', name: 'Heavy beam', col: '#ffb070', glyph: 'H', desc: (l) => 'Each shot hits for ' + (l + 2) + '. Boulders crumble faster.' },
+    { id: 'wide', name: 'Wide beam', col: '#d9b26f', glyph: 'W', desc: (l) => 'Shots land ' + 35 * (l + 1) + '% wider. Easier to hit.' },
+    { id: 'chain', name: 'Chain lightning', col: '#9fd2ff', glyph: 'C', desc: (l) => 'Every kill arcs to ' + (l + 1) + ' nearby meteor' + (l ? 's' : '') + '.' },
+    { id: 'turret', name: 'Auto-turret', col: '#c7a4ff', glyph: 'T', desc: (l) => 'The planet fires on its own every ' + [2.4, 1.6, 1.0][l] + ' s.' },
+    { id: 'slow', name: 'Gravity field', col: '#8cdcaa', glyph: 'G', desc: (l) => 'Meteors near the planet slow down by ' + 18 * (l + 1) + '%.' },
+    { id: 'shield', name: 'Extra shield', col: '#a9e0bd', glyph: '+', desc: () => '+1 shield, restored now (up to 5).' },
+  ];
+  const ROMAN = ['', 'I', 'II', 'III'];
+
+  function openUpgrade() {
+    const pool = SKILLS.filter((k) => game.skills[k.id] < 3 && !(k.id === 'shield' && game.maxLives >= 5));
+    if (!pool.length) return false;
+    for (let i = pool.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); const t = pool[i]; pool[i] = pool[j]; pool[j] = t; }
+    game.upgradeOptions = pool.slice(0, 3);
+    game.state = 'upgrade';
+    showGameCard('upgrade');
+    sfx('wave');
+    return true;
+  }
+
+  function pickSkill(id) {
+    if (!game || game.state !== 'upgrade') return;
+    const k = SKILLS.find((x) => x.id === id);
+    if (!k || !game.upgradeOptions.includes(k)) return;
+    game.skills[id] = Math.min(3, game.skills[id] + 1);
+    if (id === 'shield') { game.maxLives = Math.min(5, game.maxLives + 1); game.lives = Math.min(game.maxLives, game.lives + 1); }
+    if (id === 'turret') game.turretT = 1;
+    game.state = 'playing';
+    hideGameCard();
+    floatText(layout.cx, layout.cy - globeRadius() - 30, k.name + ' ' + ROMAN[game.skills[id]], '#d9b26f', 1.3);
+    explodeAt(layout.cx, layout.cy, globeRadius() * 0.5, '217,178,111', 1.4);
+    sfx('power');
+    renderGameHud();
+    renderSkillChips(id);
+    game.breakT = 0.9;
+  }
+
+  function renderSkillChips(popId) {
+    const box = $('gh-skills');
+    if (!box || !game) return;
+    box.textContent = '';
+    SKILLS.forEach((k) => {
+      const lv = game.skills[k.id];
+      if (!lv) return;
+      const chip = document.createElement('span');
+      chip.className = 'skill-chip' + (popId === k.id ? ' pop' : '');
+      chip.style.borderColor = k.col;
+      chip.textContent = k.name;
+      const i = document.createElement('i');
+      i.textContent = ROMAN[lv];
+      chip.appendChild(i);
+      box.appendChild(chip);
+    });
+  }
+
+  function turretFire() {
+    const R = Math.max(40, globeRadius());
+    let best = null, bd = Infinity;
+    for (const m of game.meteors) {
+      if (m.power) continue;
+      const q = meteorPos(m);
+      if (q.x < 0 || q.y < 0 || q.x > cssW || q.y > cssH) continue;
+      const d = Math.hypot(q.nx, q.ny);
+      if (d < bd) { bd = d; best = { m, q }; }
+    }
+    if (!best) return;
+    const { cx, cy } = layout, dx = best.q.x - cx, dy = best.q.y - cy, d = Math.hypot(dx, dy) || 1;
+    const out = d > R * 1.02;
+    game.beams.push({ x0: out ? cx + (dx / d) * R * 0.98 : best.q.x, y0: out ? cy + (dy / d) * R * 0.98 : best.q.y, x1: best.q.x, y1: best.q.y, age: 0, life: 0.18, turret: true });
+    sfx('zap');
+    hitMeteor(best.m, best.q, 1 + game.skills.heavy);
+  }
+
   // --- effects -----------------------------------------------------------------
   function explodeAt(x, y, r, rgb, scale) {
     const n = Math.round(16 * scale);
@@ -3454,7 +3588,10 @@
     // Waves
     if (game.breakT > 0) {
       game.breakT -= dt;
-      if (game.breakT <= 0) nextWave();
+      if (game.breakT <= 0) {
+        if (game.pendingUpgrade) { game.pendingUpgrade = false; if (!openUpgrade()) nextWave(); }
+        else nextWave();
+      }
     } else if (game.spawnLeft > 0) {
       game.spawnT -= dt;
       if (game.spawnT <= 0) {
@@ -3469,15 +3606,24 @@
       game.score += bonus;
       banner('Wave ' + game.wave + ' cleared', '+' + bonus.toLocaleString('en-US') + ' shield bonus');
       sfx('power');
-      game.breakT = 2.4;
+      game.breakT = 1.3;
+      game.pendingUpgrade = true;
       renderGameHud();
     }
 
     game.powerT -= dt;
     if (game.powerT <= 0) { spawnPower(); game.powerT = rnd(13, 22); }
 
+    if (game.skills.turret > 0 && game.state === 'playing') {
+      game.turretT -= dt;
+      if (game.turretT <= 0) { game.turretT = [0, 2.4, 1.6, 1.0][game.skills.turret]; turretFire(); }
+    }
+    const slowR = 2.3, slowK = 1 - 0.18 * game.skills.slow;
     for (const m of game.meteors.slice()) {
-      m.t += dt;
+      if (game.state !== 'playing') break;
+      let step = dt;
+      if (game.skills.slow && !m.power) { const q = meteorPos(m); if (Math.hypot(q.nx, q.ny) < slowR) step *= slowK; }
+      m.t += step;
       m.rot += m.spin * dt;
       if (m.flash > 0) m.flash = Math.max(0, m.flash - dt * 4);
       if (m.t >= m.dur) {
@@ -3501,7 +3647,7 @@
   function drawCraters(g, cx, cy, R) {
     if (!game || !game.craters.length) return;
     const mtx = planetMatrix();
-    const damage = 1 - game.lives / G_LIVES;
+    const damage = 1 - game.lives / game.maxLives;
     const lw = Math.max(1, R / 240);
     g.save();
     g.beginPath(); g.arc(cx, cy, R, 0, Math.PI * 2); g.clip();
@@ -3607,6 +3753,25 @@
     const g = ctx;
     for (const b of game.beams) {
       const a = 1 - b.age / b.life;
+      if (b.arc) {
+        // Jagged lightning between meteors.
+        g.strokeStyle = 'rgba(170,215,255,' + a + ')'; g.lineWidth = 2.2; g.lineJoin = 'round';
+        g.beginPath(); g.moveTo(b.x0, b.y0);
+        for (let i = 1; i < 7; i++) {
+          const t = i / 7, jx = (Math.random() - 0.5) * 18, jy = (Math.random() - 0.5) * 18;
+          g.lineTo(b.x0 + (b.x1 - b.x0) * t + jx, b.y0 + (b.y1 - b.y0) * t + jy);
+        }
+        g.lineTo(b.x1, b.y1); g.stroke();
+        glowDot(g, b.x1, b.y1, 16 * a + 3, '170,215,255', a);
+        continue;
+      }
+      if (b.turret) {
+        g.strokeStyle = 'rgba(199,164,255,' + a + ')'; g.lineWidth = 2.4 * a + 0.8; g.lineCap = 'round';
+        g.beginPath(); g.moveTo(b.x0, b.y0); g.lineTo(b.x1, b.y1); g.stroke();
+        glowDot(g, b.x0, b.y0, 9 * a + 2, '199,164,255', a);
+        glowDot(g, b.x1, b.y1, 12 * a + 2, '199,164,255', a);
+        continue;
+      }
       if (b.x0 !== b.x1 || b.y0 !== b.y1) {
         const gr = g.createLinearGradient(b.x0, b.y0, b.x1, b.y1);
         gr.addColorStop(0, 'rgba(255,240,200,' + a + ')'); gr.addColorStop(1, 'rgba(255,190,110,' + a * 0.9 + ')');
@@ -3619,6 +3784,13 @@
       glowDot(g, b.x1, b.y1, 14 * a + 2, '255,220,160', a * 0.9);
     }
     g.globalAlpha = 1;
+    if (game.skills.slow && (game.state === 'playing' || game.state === 'upgrade' || game.state === 'paused')) {
+      const R = Math.max(40, globeRadius());
+      g.strokeStyle = 'rgba(140,220,170,' + (0.1 + 0.05 * game.skills.slow + 0.04 * Math.sin(now * 0.003)) + ')';
+      g.lineWidth = 1.5; g.setLineDash([4, 8]);
+      g.beginPath(); g.arc(layout.cx, layout.cy, R * 2.3, 0, Math.PI * 2); g.stroke();
+      g.setLineDash([]);
+    }
     for (const m of game.meteors) drawRock(g, m, now);
     for (const r of game.rings) {
       const k = r.age / r.life;
@@ -3835,7 +4007,7 @@
     setSeed: (s) => { dom.seed.value = Terra.normalizeSeed(s); return requestSeed(s); },
     get quality() { return Math.round(qualityCap); },
     get game() {
-      return game ? { state: game.state, score: game.score, lives: game.lives, wave: game.wave, combo: game.combo, meteors: game.meteors.length, craters: game.craters.length } : null;
+      return game ? { state: game.state, score: game.score, lives: game.lives, maxLives: game.maxLives, wave: game.wave, combo: game.combo, meteors: game.meteors.length, craters: game.craters.length, skills: Object.assign({}, game.skills), options: game.upgradeOptions.map((k) => k.id) } : null;
     },
     gameTargets() {
       if (!game) return [];
