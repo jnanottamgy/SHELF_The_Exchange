@@ -134,6 +134,43 @@ svg { display: block; }
 .seed-status { color: var(--muted); font-size: 12px; white-space: nowrap; font-family: var(--mono); }
 
 .top-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+.stars {
+  display: inline-flex; align-items: center; gap: 6px; height: 38px; padding: 0 13px 0 11px;
+  border-radius: 999px; background: var(--panel-strong); border: 1px solid rgba(250, 204, 21, .35);
+  color: #fde68a; font-size: 12.5px; white-space: nowrap;
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+}
+.stars svg { width: 16px; height: 16px; fill: #facc15; filter: drop-shadow(0 0 6px rgba(250,204,21,.6)); }
+.stars b { font-family: var(--mono); font-size: 14px; color: #fff; }
+.stars-rank { color: #fcd34d; font-weight: 600; }
+.stars.pop { animation: star-pop .8s var(--ease); }
+@keyframes star-pop { 30% { transform: scale(1.25); box-shadow: 0 0 30px rgba(250,204,21,.6); } }
+
+.confetti { position: fixed; inset: 0; pointer-events: none; z-index: 70; overflow: hidden; }
+.confetti i {
+  position: absolute; width: 8px; height: 12px; border-radius: 2px; opacity: 0;
+  animation: confetti 1.5s cubic-bezier(.15,.7,.3,1) forwards;
+}
+@keyframes confetti {
+  0% { opacity: 1; transform: translate(0, 0) rotate(0); }
+  100% { opacity: 0; transform: translate(var(--dx), var(--dy)) rotate(var(--rot)); }
+}
+
+.photo-exit {
+  position: fixed; right: 16px; bottom: 16px; z-index: 40;
+  display: none; align-items: center; gap: 6px; height: 34px; padding: 0 12px;
+  border-radius: 999px; border: 1px solid var(--stroke); background: rgba(10,13,30,.45);
+  color: var(--muted); font-size: 12px; opacity: .55; transition: opacity .2s;
+}
+.photo-exit:hover, .photo-exit:focus-visible { opacity: 1; }
+.photo-exit svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+body.photo .photo-exit { display: inline-flex; }
+
+/* Photo mode: only the planet and the stars. */
+body.photo .topbar, body.photo .panel, body.photo .mission, body.photo .hud,
+body.photo .view-switch, body.photo .hint, body.photo .forming, body.photo .tooltip {
+  opacity: 0 !important; pointer-events: none !important; transition: opacity .4s;
+}
 
 .icon-btn, .pill-btn, .hud-btn {
   display: inline-flex; align-items: center; justify-content: center; gap: 8px;
@@ -603,6 +640,8 @@ kbd {
 }
 
 @media (max-width: 520px) {
+  .stars-rank { display: none; }
+  .stars { padding: 0 10px; }
   .app { padding: 10px; gap: 10px; }
   .brand-tag { display: none; }
   .brand-name { font-size: 13px; letter-spacing: .26em; }

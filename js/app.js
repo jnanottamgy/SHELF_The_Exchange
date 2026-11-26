@@ -816,6 +816,46 @@
     { text: 'Light up the night: grow a civilization', p: (s) => (s.civilization ? 1 : Math.min(0.95, s.habitability / 35)) },
   ];
   let mission = null;
+
+  // Stars: one per planet whose mission you complete (remembered on this device).
+  const RANKS = [[0, 'Cadet'], [1, 'Explorer'], [3, 'Pioneer'], [6, 'Terraformer'], [10, 'World-shaper'], [20, 'Star-forger']];
+  let earned = new Set();
+  try { earned = new Set(JSON.parse(localStorage.getItem('tinyterra-stars') || '[]').filter((x) => typeof x === 'number').slice(0, 5000)); } catch (e) { earned = new Set(); }
+  function rankFor(n) { let r = RANKS[0][1]; RANKS.forEach(([min, name]) => { if (n >= min) r = name; }); return r; }
+  function renderStars(pop) {
+    $('stars-count').textContent = String(earned.size);
+    $('stars-rank').textContent = rankFor(earned.size);
+    const el = $('stars');
+    el.title = earned.size + ' star' + (earned.size === 1 ? '' : 's') + ' earned · rank ' + rankFor(earned.size);
+    if (pop) { el.classList.remove('pop'); void el.offsetWidth; el.classList.add('pop'); }
+  }
+  function awardStar() {
+    if (earned.has(planet.hash)) return false;
+    const before = rankFor(earned.size);
+    earned.add(planet.hash);
+    try { localStorage.setItem('tinyterra-stars', JSON.stringify(Array.from(earned))); } catch (e) { /* private mode */ }
+    renderStars(true);
+    return rankFor(earned.size) !== before;
+  }
+
+  function confetti() {
+    if (reduceMotion) return;
+    const box = $('confetti'), r = missionEl.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    const colors = ['#6ee7ff', '#34d399', '#facc15', '#fb7185', '#a78bfa', '#ffb86b'];
+    for (let i = 0; i < 46; i++) {
+      const p = document.createElement('i');
+      const a = Math.random() * Math.PI * 2, d = 90 + Math.random() * 220;
+      p.style.left = cx + 'px'; p.style.top = cy + 'px';
+      p.style.background = colors[i % colors.length];
+      p.style.setProperty('--dx', (Math.cos(a) * d).toFixed(0) + 'px');
+      p.style.setProperty('--dy', (Math.sin(a) * d * 0.7 + 160).toFixed(0) + 'px');
+      p.style.setProperty('--rot', (Math.random() * 720 - 360).toFixed(0) + 'deg');
+      p.style.animationDelay = (Math.random() * 0.12).toFixed(2) + 's';
+      box.appendChild(p);
+    }
+    setTimeout(() => { box.textContent = ''; }, 1900);
+  }
   const missionEl = $('mission'), missionText = $('mission-text'), missionPct = $('mission-pct'),
     missionFill = $('mission-fill'), missionLabel = $('mission-label');
 
@@ -849,7 +889,10 @@
       void missionEl.offsetWidth;
       missionEl.classList.add('celebrate');
       sfx('chime');
-      toast('Mission complete! Roll a new planet (R) for a new challenge.', 3200);
+      confetti();
+      const promoted = awardStar();
+      toast(promoted ? 'Mission complete! New rank: ' + rankFor(earned.size) + ' ★'
+        : 'Mission complete! +1 star. Roll a new planet (R) for a new challenge.', 3200);
     }
   }
 
@@ -1226,6 +1269,7 @@
       return;
     }
     if (e.key === 'Escape') {
+      if (document.body.classList.contains('photo')) setPhoto(false);
       if (document.activeElement === dom.seed) { dom.seed.value = state.seed; dom.seed.blur(); refreshSeedStatus(); }
       hideTip();
       return;
@@ -1247,6 +1291,7 @@
     else if (k === 'g' || k === 'G') setToggle('grid', !state.grid);
     else if (k === 't' || k === 'T') { setLapse(!lapse); }
     else if (k === 'a' || k === 'A') toggleSound();
+    else if (k === 'h' || k === 'H') setPhoto(!document.body.classList.contains('photo'));
     else if (k === 's' || k === 'S') share();
     else if (k === 'p' || k === 'P') savePostcard();
     else if ((k === '+' || k === '=') && state.view === 'globe') setZoom(view.targetZoom * 1.2);
@@ -1539,6 +1584,17 @@
     dom.sound.setAttribute('aria-pressed', on ? 'true' : 'false');
     dom.sound.setAttribute('aria-label', on ? 'Mute sound' : 'Turn sound on');
   }
+  function setPhoto(on) {
+    const now = document.body.classList.toggle('photo', !!on);
+    const el = $('tg-photo');
+    el.classList.toggle('on', now); el.setAttribute('aria-pressed', now ? 'true' : 'false');
+    hideTip();
+    if (now) toast('Photo mode: press H or Esc to bring the controls back', 2400);
+    sfx(now ? 'shutter' : 'off');
+  }
+  $('tg-photo').addEventListener('click', () => setPhoto(true));
+  $('photo-exit').addEventListener('click', () => setPhoto(false));
+
   function toggleSound() {
     if (!audio || !audio.supported) { toast('Sound is not supported in this browser'); return; }
     const on = audio.setEnabled(!audio.enabled);
@@ -1553,6 +1609,7 @@
   }
   dom.sound.addEventListener('click', toggleSound);
   updateSoundButton();
+  renderStars(false);
   dom.random.addEventListener('click', randomPlanet);
   dom.share.addEventListener('click', share);
   dom.save.addEventListener('click', savePostcard);

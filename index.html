@@ -40,6 +40,10 @@
       </form>
 
       <div class="top-actions">
+        <div class="stars" id="stars" title="Stars earned by completing planet missions">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.8l2.8 5.8 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 3 1.1-6.3L2.9 9.5l6.3-.9z"/></svg>
+          <b id="stars-count">0</b><span class="stars-rank" id="stars-rank">Cadet</span>
+        </div>
         <button type="button" class="pill-btn" id="btn-share" title="Copy a link to this exact planet (S)">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14a5 5 0 007.1 0l3-3a5 5 0 00-7.1-7.1l-1.2 1.2"/><path d="M14 10a5 5 0 00-7.1 0l-3 3a5 5 0 007.1 7.1l1.2-1.2"/></svg>
           <span>Share</span>
@@ -203,6 +207,9 @@
         <button type="button" class="toggle" id="tg-grid" aria-pressed="false" title="Latitude grid (G)">
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3v18M5 7h14M5 17h14"/></svg>Grid
         </button>
+        <button type="button" class="toggle" id="tg-photo" aria-pressed="false" title="Photo mode: hide everything but the planet (H)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h3l2-2.5h6L17 8h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Photo mode
+        </button>
         <button type="button" class="toggle" id="tg-lapse" aria-pressed="false" title="Climate time-lapse: sweep the temperature from ice age to hothouse and back (T)">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 13.5V5a2 2 0 014 0v8.5a4 4 0 11-4 0z"/><path d="M12 9v6"/></svg>Time-lapse
         </button>
@@ -236,6 +243,7 @@
         <div><kbd>G</kbd> Grid</div>
         <div><kbd>T</kbd> Climate time-lapse</div>
         <div><kbd>A</kbd> Sound on or off</div>
+        <div><kbd>H</kbd> Photo mode</div>
         <div><kbd>1</kbd>–<kbd>6</kbd> Presets</div>
         <div><kbd>S</kbd> Share, <kbd>P</kbd> postcard</div>
       </div>
@@ -244,6 +252,10 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <div class="confetti" id="confetti" aria-hidden="true"></div>
+  <button type="button" class="photo-exit" id="photo-exit" aria-label="Exit photo mode">
+    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"/></svg>Exit photo mode
+  </button>
   <noscript><div class="noscript">Tiny Terra needs JavaScript to build planets.</div></noscript>
 
   <script src="js/terra.js"></script>
