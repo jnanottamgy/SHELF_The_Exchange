@@ -327,6 +327,7 @@ svg { display: block; }
 }
 @keyframes rise-in { from { opacity: 0; transform: translate(-50%, 14px); } }
 .hud-btn { width: 38px; height: 38px; border-radius: 50%; border-color: transparent; background: transparent; }
+.hud-btn:disabled { opacity: .35; cursor: default; box-shadow: none; background: transparent; border-color: transparent; transform: none; }
 #btn-play svg { fill: currentColor; stroke: none; }
 #btn-play .i-play { display: none; }
 #btn-play.paused .i-play { display: block; }
@@ -487,7 +488,7 @@ kbd {
   .topbar { flex-wrap: wrap; }
   .seed-bar { order: 3; flex-basis: 100%; max-width: none; }
   .top-actions { margin-left: auto; }
-  .stage { order: 2; height: min(78vh, 112vw); min-height: 340px; }
+  .stage { order: 2; height: min(66vh, calc(100vw + 130px)); min-height: 340px; }
   #view { position: absolute; width: 100%; height: 100%; border-radius: var(--radius); }
   .lab { order: 3; overflow: visible; }
   .card { order: 4; overflow: visible; }

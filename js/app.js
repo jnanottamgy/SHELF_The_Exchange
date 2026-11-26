@@ -63,7 +63,7 @@
   const state = {
     seed: initial.seed,
     temp: initial.temp, water: initial.water, terrain: initial.terrain,
-    speed: initial.speed, view: initial.view,
+    speed: reduceMotion ? 1 : initial.speed, view: initial.view,
     paused: false, clouds: true, lights: true, grid: false,
   };
 
@@ -161,6 +161,7 @@
     if (dom.canvas.width !== w || dom.canvas.height !== h) { dom.canvas.width = w; dom.canvas.height = h; }
     dpr = nd; cssW = rect.width; cssH = rect.height;
     computeLayout();
+    positionGlider();
     dirty = true;
   }
 
@@ -185,35 +186,6 @@
   // ---------------------------------------------------------------------------
   // Globe shading (per pixel, into an ImageData buffer)
   // ---------------------------------------------------------------------------
-  const discCache = new Map();
-  function getDisc(N) {
-    let d = discCache.get(N);
-    if (d) return d;
-    const r = N / 2, max = N * N;
-    const idx = new Uint32Array(max), nx = new Float32Array(max), ny = new Float32Array(max);
-    const nz = new Float32Array(max), al = new Float32Array(max);
-    let count = 0;
-    for (let y = 0; y < N; y++) {
-      const dy = (y + 0.5 - r) / r;
-      for (let x = 0; x < N; x++) {
-        const dx = (x + 0.5 - r) / r;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const cover = (1 - dist) * r + 0.5;
-        if (cover <= 0) continue;
-        let vx = dx, vy = -dy;
-        if (dist > 0.9995) { const k = 0.9995 / dist; vx *= k; vy *= k; }
-        idx[count] = (y * N + x) * 4;
-        nx[count] = vx; ny[count] = vy; nz[count] = Math.sqrt(Math.max(0, 1 - vx * vx - vy * vy));
-        al[count] = cover > 1 ? 255 : cover * 255;
-        count++;
-      }
-    }
-    d = { N, count, idx: idx.slice(0, count), nx: nx.slice(0, count), ny: ny.slice(0, count), nz: nz.slice(0, count), al: al.slice(0, count), img: null, canvas: null };
-    if (discCache.size > 4) discCache.clear();
-    discCache.set(N, d);
-    return d;
-  }
-
   function frameParams() {
     return {
       m: planetMatrix(), sun: sunView(), clouds: state.clouds, lights: state.lights, grid: state.grid,
@@ -221,12 +193,16 @@
     };
   }
 
-  function shadeGlobe(data, disc, P) {
+  /**
+   * Shades an N×N globe into `data` (an RGBA buffer `stride` pixels wide).
+   * Normals are computed on the fly, so zooming allocates nothing.
+   */
+  function shadeGlobe(data, stride, N, P) {
     const tex = climate.rgb, wat = climate.water, lights = climate.lights, ltype = climate.lightType, clouds = climate.clouds;
     const hgt = climate.height, sl = climate.seaLevel;
     const W = planet.W, H = planet.H, CW = planet.CW, CH = planet.CH;
     // Coast edge width in texels: about one screen pixel at this zoom.
-    const coastSharp = clamp(W / (Math.PI * disc.N), 0.08, 1);
+    const coastSharp = clamp(W / (Math.PI * N), 0.08, 1);
     const m = P.m, m00 = m[0], m01 = m[1], m02 = m[2], m10 = m[3], m11 = m[4], m12 = m[5], m20 = m[6], m21 = m[7], m22 = m[8];
     const sx = P.sun[0], sy = P.sun[1], sz = P.sun[2];
     let hx = sx, hy = sy, hz = sz + 1;
@@ -234,127 +210,146 @@
     const showClouds = P.clouds, showLights = P.lights, grid = P.grid;
     const ar = P.atm[0], ag = P.atm[1], ab = P.atm[2];
     const cShift = P.cloudShift;
-    const gridEps = 0.55 * (512 / disc.N);
-    const { count, idx, nx, ny, nz, al } = disc;
-    for (let k = 0; k < count; k++) {
-      const vx = nx[k], vy = ny[k], vz = nz[k];
-      const px = m00 * vx + m01 * vy + m02 * vz;
-      let py = m10 * vx + m11 * vy + m12 * vz;
-      const pz = m20 * vx + m21 * vy + m22 * vz;
-      if (py > 1) py = 1; else if (py < -1) py = -1;
-      const lon = Math.atan2(px, pz), lat = Math.asin(py);
-      const u = (lon * INV_2PI + 0.5) * W - 0.5;
-      const v = (0.5 - lat * INV_PI) * H - 0.5;
-      let x0 = Math.floor(u); const fx = u - x0;
-      if (x0 < 0) x0 += W; else if (x0 >= W) x0 -= W;
-      const x1 = x0 + 1 === W ? 0 : x0 + 1;
-      let y0 = Math.floor(v), fy = v - y0;
-      if (y0 < 0) { y0 = 0; fy = 0; } else if (y0 >= H - 1) { y0 = H - 1; fy = 0; }
-      const y1 = y0 + 1 < H ? y0 + 1 : y0;
-      const r0 = y0 * W, r1 = y1 * W;
-      const ia = r0 + x0, ib = r0 + x1, ic = r1 + x0, id = r1 + x1;
-      const a = ia * 3, b = ib * 3, c = ic * 3, d = id * 3;
-      const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
-      let R, G, B, wet;
-      const ha = hgt[ia], hb = hgt[ib], hc = hgt[ic], hd = hgt[id];
-      const la = ha >= sl, lb = hb >= sl, lc = hc >= sl, ld = hd >= sl;
-      if (la === lb && lb === lc && lc === ld) {
-        R = tex[a] * w00 + tex[b] * w10 + tex[c] * w01 + tex[d] * w11;
-        G = tex[a + 1] * w00 + tex[b + 1] * w10 + tex[c + 1] * w01 + tex[d + 1] * w11;
-        B = tex[a + 2] * w00 + tex[b + 2] * w10 + tex[c + 2] * w01 + tex[d + 2] * w11;
-        wet = la ? 0 : (wat[ia] * w00 + wat[ib] * w10 + wat[ic] * w01 + wat[id] * w11);
-      } else {
-        // The coastline crosses this texel cell: blend land-only and
-        // sea-only colours along the interpolated height, so coasts stay
-        // smooth curves instead of a staircase of texels.
-        let wl = 0, ws = 0, Rl = 0, Gl = 0, Bl = 0, Rs = 0, Gs = 0, Bs = 0;
-        if (la) { wl += w00; Rl += tex[a] * w00; Gl += tex[a + 1] * w00; Bl += tex[a + 2] * w00; }
-        else { ws += w00; Rs += tex[a] * w00; Gs += tex[a + 1] * w00; Bs += tex[a + 2] * w00; }
-        if (lb) { wl += w10; Rl += tex[b] * w10; Gl += tex[b + 1] * w10; Bl += tex[b + 2] * w10; }
-        else { ws += w10; Rs += tex[b] * w10; Gs += tex[b + 1] * w10; Bs += tex[b + 2] * w10; }
-        if (lc) { wl += w01; Rl += tex[c] * w01; Gl += tex[c + 1] * w01; Bl += tex[c + 2] * w01; }
-        else { ws += w01; Rs += tex[c] * w01; Gs += tex[c + 1] * w01; Bs += tex[c + 2] * w01; }
-        if (ld) { wl += w11; Rl += tex[d] * w11; Gl += tex[d + 1] * w11; Bl += tex[d + 2] * w11; }
-        else { ws += w11; Rs += tex[d] * w11; Gs += tex[d + 1] * w11; Bs += tex[d + 2] * w11; }
-        const hi = ha * w00 + hb * w10 + hc * w01 + hd * w11;
-        let span = Math.max(ha, hb, hc, hd) - Math.min(ha, hb, hc, hd);
-        if (span < 1e-6) span = 1e-6;
-        let kk = (hi - sl) / (span * coastSharp) + 0.5;
-        kk = kk < 0 ? 0 : kk > 1 ? 1 : kk;
-        if (wl < 1e-6) kk = 0; else if (ws < 1e-6) kk = 1;
-        const il = wl > 1e-6 ? kk / wl : 0, is = ws > 1e-6 ? (1 - kk) / ws : 0;
-        R = Rl * il + Rs * is; G = Gl * il + Gs * is; B = Bl * il + Bs * is;
-        wet = 1 - kk;
-      }
-      const ni = (fy < 0.5 ? r0 : r1) + (fx < 0.5 ? x0 : x1);
-
-      // Sunlight with a soft terminator.
-      const ndl = vx * sx + vy * sy + vz * sz;
-      let day = (ndl + 0.12) * 3.4;
-      day = day < 0 ? 0 : day > 1 ? 1 : day;
-      day = day * day * (3 - 2 * day);
-      const diff = ndl > 0 ? ndl : 0;
-      const lit = 0.05 + day * (0.4 + 0.72 * diff);
-      R *= lit; G *= lit; B *= lit;
-      const tw = 1 - Math.abs(ndl + 0.03) * 6;
-      if (tw > 0) { const t2 = tw * tw * 0.55; R += 72 * t2; G += 30 * t2; B += 10 * t2; }
-
-      // Sun glint on open water.
-      if (wet > 0.02 && ndl > 0) {
-        const nh = vx * hx + vy * hy + vz * hz;
-        if (nh > 0.82) {
-          const s = (Math.pow(nh, 160) * 0.55 + Math.pow(nh, 16) * 0.08) * day * wet;
-          R += 255 * s; G += 246 * s; B += 222 * s;
+    const gridEps = 0.55 * (512 / N);
+    const rad = N / 2, invR = 1 / rad, lim = 1 + 1.5 * invR, lim2 = lim * lim;
+    const inner = 1 - 2 * invR, inner2 = inner > 0 ? inner * inner : 0;
+    for (let y = 0; y < N; y++) {
+      const dy = (y + 0.5 - rad) * invR;
+      if (dy * dy >= lim2) continue;
+      const half = Math.sqrt(lim2 - dy * dy) * rad;
+      let xs = Math.floor(rad - half - 1), xe = Math.ceil(rad + half + 1);
+      if (xs < 0) xs = 0;
+      if (xe > N) xe = N;
+      let o = (y * stride + xs) * 4;
+      for (let x = xs; x < xe; x++, o += 4) {
+        const dx = (x + 0.5 - rad) * invR;
+        const d2 = dx * dx + dy * dy;
+        let alpha = 255, vx = dx, vy = -dy;
+        if (d2 > inner2) {
+          const dist = Math.sqrt(d2);
+          const cover = (1 - dist) * rad + 0.5;
+          if (cover <= 0) { data[o + 3] = 0; continue; }
+          alpha = cover >= 1 ? 255 : cover * 255;
+          if (dist > 0.9995) { const k = 0.9995 / dist; vx *= k; vy *= k; }
         }
-      }
-
-      // City lights and lava glow on the night side (soft, bilinear).
-      if (showLights && day < 0.98) {
-        const L = lights[ia] * w00 + lights[ib] * w10 + lights[ic] * w01 + lights[id] * w11;
-        if (L > 0.5) {
-          const nf = (1 - day) * L * (1 / 255);
-          if (ltype[ni] === 2) { R += 255 * nf; G += 88 * nf; B += 24 * nf; }
-          else { R += 268 * nf; G += 204 * nf; B += 124 * nf; }
+        const vz = Math.sqrt(Math.max(0, 1 - vx * vx - vy * vy));
+        const px = m00 * vx + m01 * vy + m02 * vz;
+        let py = m10 * vx + m11 * vy + m12 * vz;
+        const pz = m20 * vx + m21 * vy + m22 * vz;
+        if (py > 1) py = 1; else if (py < -1) py = -1;
+        const lon = Math.atan2(px, pz), lat = Math.asin(py);
+        const u = (lon * INV_2PI + 0.5) * W - 0.5;
+        const v = (0.5 - lat * INV_PI) * H - 0.5;
+        let x0 = Math.floor(u); const fx = u - x0;
+        if (x0 < 0) x0 += W; else if (x0 >= W) x0 -= W;
+        const x1 = x0 + 1 === W ? 0 : x0 + 1;
+        let y0 = Math.floor(v), fy = v - y0;
+        if (y0 < 0) { y0 = 0; fy = 0; } else if (y0 >= H - 1) { y0 = H - 1; fy = 0; }
+        const y1 = y0 + 1 < H ? y0 + 1 : y0;
+        const r0 = y0 * W, r1 = y1 * W;
+        const ia = r0 + x0, ib = r0 + x1, ic = r1 + x0, id = r1 + x1;
+        const a = ia * 3, b = ib * 3, c = ic * 3, d = id * 3;
+        const w00 = (1 - fx) * (1 - fy), w10 = fx * (1 - fy), w01 = (1 - fx) * fy, w11 = fx * fy;
+        let R, G, B, wet;
+        const ha = hgt[ia], hb = hgt[ib], hc = hgt[ic], hd = hgt[id];
+        const la = ha >= sl, lb = hb >= sl, lc = hc >= sl, ld = hd >= sl;
+        if (la === lb && lb === lc && lc === ld) {
+          R = tex[a] * w00 + tex[b] * w10 + tex[c] * w01 + tex[d] * w11;
+          G = tex[a + 1] * w00 + tex[b + 1] * w10 + tex[c + 1] * w01 + tex[d + 1] * w11;
+          B = tex[a + 2] * w00 + tex[b + 2] * w10 + tex[c + 2] * w01 + tex[d + 2] * w11;
+          wet = la ? 0 : (wat[ia] * w00 + wat[ib] * w10 + wat[ic] * w01 + wat[id] * w11);
+        } else {
+          // The coastline crosses this texel cell: blend land-only and
+          // sea-only colours along the interpolated height, so coasts stay
+          // smooth curves instead of a staircase of texels.
+          let wl = 0, ws = 0, Rl = 0, Gl = 0, Bl = 0, Rs = 0, Gs = 0, Bs = 0;
+          if (la) { wl += w00; Rl += tex[a] * w00; Gl += tex[a + 1] * w00; Bl += tex[a + 2] * w00; }
+          else { ws += w00; Rs += tex[a] * w00; Gs += tex[a + 1] * w00; Bs += tex[a + 2] * w00; }
+          if (lb) { wl += w10; Rl += tex[b] * w10; Gl += tex[b + 1] * w10; Bl += tex[b + 2] * w10; }
+          else { ws += w10; Rs += tex[b] * w10; Gs += tex[b + 1] * w10; Bs += tex[b + 2] * w10; }
+          if (lc) { wl += w01; Rl += tex[c] * w01; Gl += tex[c + 1] * w01; Bl += tex[c + 2] * w01; }
+          else { ws += w01; Rs += tex[c] * w01; Gs += tex[c + 1] * w01; Bs += tex[c + 2] * w01; }
+          if (ld) { wl += w11; Rl += tex[d] * w11; Gl += tex[d + 1] * w11; Bl += tex[d + 2] * w11; }
+          else { ws += w11; Rs += tex[d] * w11; Gs += tex[d + 1] * w11; Bs += tex[d + 2] * w11; }
+          const hi = ha * w00 + hb * w10 + hc * w01 + hd * w11;
+          let span = Math.max(ha, hb, hc, hd) - Math.min(ha, hb, hc, hd);
+          if (span < 1e-6) span = 1e-6;
+          let kk = (hi - sl) / (span * coastSharp) + 0.5;
+          kk = kk < 0 ? 0 : kk > 1 ? 1 : kk;
+          if (wl < 1e-6) kk = 0; else if (ws < 1e-6) kk = 1;
+          const il = wl > 1e-6 ? kk / wl : 0, is = ws > 1e-6 ? (1 - kk) / ws : 0;
+          R = Rl * il + Rs * is; G = Gl * il + Gs * is; B = Bl * il + Bs * is;
+          wet = 1 - kk;
         }
-      }
+        const ni = (fy < 0.5 ? r0 : r1) + (fx < 0.5 ? x0 : x1);
 
-      // Clouds (half-resolution layer, drifting with the wind).
-      if (showClouds) {
-        let cu = (u + 0.5) * 0.5 - 0.5 + cShift;
-        cu %= CW; if (cu < 0) cu += CW;
-        let cv = (v + 0.5) * 0.5 - 0.5;
-        if (cv < 0) cv = 0; else if (cv > CH - 1) cv = CH - 1;
-        const cx0 = cu | 0, cfx = cu - cx0, cx1 = cx0 + 1 === CW ? 0 : cx0 + 1;
-        const cy0 = cv | 0, cfy = cv - cy0, cy1 = cy0 + 1 < CH ? cy0 + 1 : cy0;
-        const q0 = cy0 * CW, q1 = cy1 * CW;
-        const cr = (clouds[q0 + cx0] * (1 - cfx) + clouds[q0 + cx1] * cfx) * (1 - cfy) +
-          (clouds[q1 + cx0] * (1 - cfx) + clouds[q1 + cx1] * cfx) * cfy;
-        if (cr > 0) {
-          const cd = cr >= 1 ? 0.78 : cr * cr * (3 - 2 * cr) * 0.78;
-          const cl = 0.035 + day * (0.5 + 0.55 * diff);
-          R += (248 * cl - R) * cd; G += (250 * cl - G) * cd; B += (255 * cl - B) * cd;
+        // Sunlight with a soft terminator.
+        const ndl = vx * sx + vy * sy + vz * sz;
+        let day = (ndl + 0.12) * 3.4;
+        day = day < 0 ? 0 : day > 1 ? 1 : day;
+        day = day * day * (3 - 2 * day);
+        const diff = ndl > 0 ? ndl : 0;
+        const lit = 0.05 + day * (0.4 + 0.72 * diff);
+        R *= lit; G *= lit; B *= lit;
+        const tw = 1 - Math.abs(ndl + 0.03) * 6;
+        if (tw > 0) { const t2 = tw * tw * 0.55; R += 72 * t2; G += 30 * t2; B += 10 * t2; }
+
+        // Sun glint on open water.
+        if (wet > 0.02 && ndl > 0) {
+          const nh = vx * hx + vy * hy + vz * hz;
+          if (nh > 0.82) {
+            const s = (Math.pow(nh, 160) * 0.55 + Math.pow(nh, 16) * 0.08) * day * wet;
+            R += 255 * s; G += 246 * s; B += 222 * s;
+          }
         }
-      }
 
-      if (grid) {
-        const latD = lat * DEG, lonD = lon * DEG;
-        const gl = Math.abs(latD - Math.round(latD / 30) * 30);
-        const go = Math.abs(lonD - Math.round(lonD / 30) * 30) * Math.cos(lat);
-        if (gl < gridEps || go < gridEps) {
-          const k = Math.abs(latD) < gridEps ? 0.55 : 0.32;
-          R += (110 - R) * k; G += (231 - G) * k; B += (255 - B) * k;
+        // City lights and lava glow on the night side (soft, bilinear).
+        if (showLights && day < 0.98) {
+          const L = lights[ia] * w00 + lights[ib] * w10 + lights[ic] * w01 + lights[id] * w11;
+          if (L > 0.5) {
+            const nf = (1 - day) * L * (1 / 255);
+            if (ltype[ni] === 2) { R += 255 * nf; G += 88 * nf; B += 24 * nf; }
+            else { R += 268 * nf; G += 204 * nf; B += 124 * nf; }
+          }
         }
+
+        // Clouds (half-resolution layer, drifting with the wind).
+        if (showClouds) {
+          let cu = (u + 0.5) * 0.5 - 0.5 + cShift;
+          cu %= CW; if (cu < 0) cu += CW;
+          let cv = (v + 0.5) * 0.5 - 0.5;
+          if (cv < 0) cv = 0; else if (cv > CH - 1) cv = CH - 1;
+          const cx0 = cu | 0, cfx = cu - cx0, cx1 = cx0 + 1 === CW ? 0 : cx0 + 1;
+          const cy0 = cv | 0, cfy = cv - cy0, cy1 = cy0 + 1 < CH ? cy0 + 1 : cy0;
+          const q0 = cy0 * CW, q1 = cy1 * CW;
+          const cr = (clouds[q0 + cx0] * (1 - cfx) + clouds[q0 + cx1] * cfx) * (1 - cfy) +
+            (clouds[q1 + cx0] * (1 - cfx) + clouds[q1 + cx1] * cfx) * cfy;
+          if (cr > 0) {
+            const cd = cr >= 1 ? 0.78 : cr * cr * (3 - 2 * cr) * 0.78;
+            const cl = 0.035 + day * (0.5 + 0.55 * diff);
+            R += (248 * cl - R) * cd; G += (250 * cl - G) * cd; B += (255 * cl - B) * cd;
+          }
+        }
+
+        if (grid) {
+          const latD = lat * DEG, lonD = lon * DEG;
+          const gl = Math.abs(latD - Math.round(latD / 30) * 30);
+          const go = Math.abs(lonD - Math.round(lonD / 30) * 30) * Math.cos(lat);
+          if (gl < gridEps || go < gridEps) {
+            const k = Math.abs(latD) < gridEps ? 0.55 : 0.32;
+            R += (110 - R) * k; G += (231 - G) * k; B += (255 - B) * k;
+          }
+        }
+
+        // Atmosphere: limb scattering, brighter on the lit side.
+        const rim = 1 - vz, rim2 = rim * rim, rim4 = rim2 * rim2;
+        let ad = (ndl + 0.3) * 1.5;
+        ad = ad < 0 ? 0 : ad > 1 ? 1 : ad;
+        const atm = (rim2 * 0.32 + rim4 * 1.05) * ad + 0.035 * day;
+        R += ar * atm; G += ag * atm; B += ab * atm;
+
+        data[o] = R; data[o + 1] = G; data[o + 2] = B; data[o + 3] = alpha;
       }
-
-      // Atmosphere: limb scattering, brighter on the lit side.
-      const rim = 1 - vz, rim2 = rim * rim, rim4 = rim2 * rim2;
-      let ad = (ndl + 0.3) * 1.5;
-      ad = ad < 0 ? 0 : ad > 1 ? 1 : ad;
-      const atm = (rim2 * 0.32 + rim4 * 1.05) * ad + 0.035 * day;
-      R += ar * atm; G += ag * atm; B += ab * atm;
-
-      const o = idx[k];
-      data[o] = R; data[o + 1] = G; data[o + 2] = B; data[o + 3] = al[k];
     }
   }
 
@@ -517,18 +512,12 @@
   function drawGlobe(introK, pulse) {
     const R = globeRadius() * (0.6 + 0.4 * introK) * pulse;
     const { cx, cy } = layout;
-    const target = clamp(Math.round(2 * R * dpr), 64, Math.round(qualityCap));
-    const disc = getDisc(target);
-    if (!disc.img) {
-      disc.canvas = document.createElement('canvas');
-      disc.canvas.width = disc.canvas.height = disc.N;
-      disc.ctx = disc.canvas.getContext('2d');
-      disc.img = disc.ctx.createImageData(disc.N, disc.N);
-    }
+    const N = clamp(Math.round(2 * R * dpr), 64, Math.round(qualityCap));
+    const buf = globeBuffer(N);
     const P = frameParams();
     const t0 = performance.now();
-    shadeGlobe(disc.img.data, disc, P);
-    disc.ctx.putImageData(disc.img, 0, 0);
+    shadeGlobe(buf.img.data, buf.size, N, P);
+    buf.ctx.putImageData(buf.img, 0, 0, 0, 0, N, N);
     const dt = performance.now() - t0;
     shadeEma = shadeEma * 0.9 + dt * 0.1;
 
@@ -537,9 +526,24 @@
     drawRings(ctx, cx, cy, R, false, 1);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(disc.canvas, cx - R, cy - R, R * 2, R * 2);
+    ctx.drawImage(buf.canvas, 0, 0, N, N, cx - R, cy - R, R * 2, R * 2);
     drawRings(ctx, cx, cy, R, true, 1);
     ctx.globalAlpha = 1;
+  }
+
+  // One reusable offscreen buffer for the globe; cleared when its size changes.
+  const gbuf = { size: 0, n: 0, canvas: null, ctx: null, img: null };
+  function globeBuffer(N) {
+    if (gbuf.size < N) {
+      gbuf.size = Math.max(N, 800);
+      gbuf.canvas = document.createElement('canvas');
+      gbuf.canvas.width = gbuf.canvas.height = gbuf.size;
+      gbuf.ctx = gbuf.canvas.getContext('2d');
+      gbuf.img = gbuf.ctx.createImageData(gbuf.size, gbuf.size);
+      gbuf.n = 0;
+    }
+    if (gbuf.n !== N) { gbuf.img.data.fill(0); gbuf.n = N; }
+    return gbuf;
   }
 
   function drawMap(introK) {
@@ -884,6 +888,8 @@
     dom.viewGlobe.setAttribute('aria-checked', String(!isMap));
     dom.viewMap.setAttribute('aria-checked', String(isMap));
     positionGlider();
+    dom.zoomIn.disabled = isMap;
+    dom.zoomOut.disabled = isMap;
     hideTip();
     scheduleHash();
     dirty = true;
@@ -1134,8 +1140,8 @@
     else if (k === 'g' || k === 'G') setToggle('grid', !state.grid);
     else if (k === 's' || k === 'S') share();
     else if (k === 'p' || k === 'P') savePostcard();
-    else if (k === '+' || k === '=') setZoom(view.targetZoom * 1.2);
-    else if (k === '-' || k === '_') setZoom(view.targetZoom / 1.2);
+    else if ((k === '+' || k === '=') && state.view === 'globe') setZoom(view.targetZoom * 1.2);
+    else if ((k === '-' || k === '_') && state.view === 'globe') setZoom(view.targetZoom / 1.2);
     else if (k === '0') resetView();
     else if (k === 'ArrowLeft' || k === 'ArrowRight' || k === 'ArrowUp' || k === 'ArrowDown') {
       const step = 0.12;
@@ -1277,19 +1283,18 @@
       }
 
       const N = 760, cx = 500, cy = 450, R = 300;
-      const disc = getDisc(N);
-      const img = new ImageData(N, N);
-      const P = frameParams();
-      shadeGlobe(img.data, disc, P);
       const tmp = document.createElement('canvas');
       tmp.width = tmp.height = N;
-      tmp.getContext('2d').putImageData(img, 0, 0);
+      const tctx = tmp.getContext('2d');
+      const img = tctx.createImageData(N, N);
+      const P = frameParams();
+      shadeGlobe(img.data, N, N, P);
+      tctx.putImageData(img, 0, 0);
       drawHalo(g, cx, cy, R, P.atm, P.sun, 1);
       drawRings(g, cx, cy, R, false, 1);
       g.imageSmoothingQuality = 'high';
       g.drawImage(tmp, cx - R, cy - R, R * 2, R * 2);
       drawRings(g, cx, cy, R, true, 1);
-      discCache.delete(N);
 
       const st = climate.stats;
       const font = getComputedStyle(document.body).fontFamily;
@@ -1428,6 +1433,7 @@
   });
 
   window.addEventListener('resize', resize);
+  window.addEventListener('scroll', hideTip, { passive: true });
   if (window.ResizeObserver) new ResizeObserver(() => resize()).observe(dom.stage);
   document.addEventListener('visibilitychange', () => { last = performance.now(); });
 
