@@ -168,12 +168,13 @@
   function computeLayout() {
     const c = dom.canvas.getBoundingClientRect();
     const s = dom.stage.getBoundingClientRect();
-    const top = 52, bottom = 70; // room for the view switch and the HUD
+    const short = window.innerHeight <= 960 && window.innerWidth > 980;
+    const top = short ? 44 : 52, bottom = short ? 56 : 70; // room for the view switch and the HUD
     const stageW = Math.max(120, s.width), stageH = Math.max(120, s.height);
     const availH = Math.max(100, stageH - top - bottom);
     const cx = s.left - c.left + stageW / 2;
     const cy = s.top - c.top + top + availH / 2;
-    const baseR = Math.max(40, Math.min(stageW * 0.46, availH * 0.5));
+    const baseR = Math.max(40, Math.min(stageW * 0.44, availH * 0.47));
     let mapW = Math.min(stageW - 16, availH * 2);
     mapW = Math.max(160, mapW);
     const mapH = mapW / 2;
@@ -505,8 +506,10 @@
 
   /** Planet radius in CSS pixels; ringed planets shrink a little so the rings fit. */
   function globeRadius() {
-    const ringed = planet && planet.traits.rings;
-    return layout.baseR * (ringed ? 0.84 : 1) * view.zoom;
+    const t = planet && planet.traits;
+    // Ringed planets shrink so the rings stay inside the stage, clear of the panels.
+    const r = t && t.rings ? Math.min(layout.baseR * 0.84, (layout.stageW * 0.5 - 8) / (t.ringOuter * 1.02)) : layout.baseR;
+    return Math.max(40, r) * view.zoom;
   }
 
   function drawGlobe(introK, pulse) {
